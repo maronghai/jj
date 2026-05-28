@@ -333,6 +333,13 @@ fn execGet(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, st
     return 0;
 }
 
+fn parseValue(gpa: Allocator, str: []const u8) !ops.JsonValue {
+    if (str.len > 0 and (str[0] == '{' or str[0] == '[')) {
+        return ops.parse(gpa, str);
+    }
+    return .{ .string = try gpa.dupe(u8, str) };
+}
+
 fn execSet(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, stderr: File, io: Io) !void {
     if (cmd_args.len < 2) {
         try File.writeStreamingAll(stderr, io, "error: 'set' requires path value pairs\n");
@@ -355,7 +362,10 @@ fn execSet(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, s
                 value = .{ .string = try gpa.dupe(u8, value.string) };
             }
         } else {
-            value = .{ .string = try gpa.dupe(u8, value_str) };
+            value = parseValue(gpa, value_str) catch |err| {
+                writeErrorFmt(gpa, io, "error: invalid value: {s}\n", .{value_str});
+                return err;
+            };
         }
         ops.set(root, path, value, gpa) catch |err| {
             switch (err) {
@@ -416,7 +426,7 @@ fn execPush(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, 
                 else => return err,
             }
         };
-    } else if (rest.len >= 2 and rest.len % 2 == 0 and !containsEquals(rest[0])) {
+    } else if (rest.len >= 2 and rest.len % 2 == 0 and !containsEquals(rest[0]) and !looksLikeJson(rest[0])) {
         var obj: std.array_hash_map.String(ops.JsonValue) = .empty;
         var j: usize = 0;
         while (j + 1 < rest.len) : (j += 2) {
@@ -437,8 +447,11 @@ fn execPush(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, 
         };
     } else if (rest.len >= 1) {
         for (rest) |val_str| {
-            const val_dup = try gpa.dupe(u8, val_str);
-            ops.push(root, path, .{ .string = val_dup }, gpa) catch |err| {
+            const value = parseValue(gpa, val_str) catch |err| {
+                writeErrorFmt(gpa, io, "error: invalid value: {s}\n", .{val_str});
+                return err;
+            };
+            ops.push(root, path, value, gpa) catch |err| {
                 switch (err) {
                     ops.OpError.PathNotFound => {
                         writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
@@ -467,6 +480,10 @@ fn execPush(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, 
 
 fn containsEquals(s: []const u8) bool {
     return std.mem.indexOfScalar(u8, s, '=') != null;
+}
+
+fn looksLikeJson(s: []const u8) bool {
+    return s.len > 0 and (s[0] == '{' or s[0] == '[');
 }
 
 fn execPop(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, stderr: File, io: Io) !void {
@@ -625,7 +642,10 @@ fn execShorthand(gpa: Allocator, root: *ops.JsonValue, cmd: []const u8, stdout: 
             };
         } else if (eq_pos > 0 and cmd[eq_pos - 1] == '+') {
             const actual_path = cmd[0 .. eq_pos - 1];
-            const value: ops.JsonValue = .{ .string = try gpa.dupe(u8, rest) };
+            const value = parseValue(gpa, rest) catch |err| {
+                writeErrorFmt(gpa, io, "error: invalid value: {s}\n", .{rest});
+                return err;
+            };
             ops.push(root, actual_path, value, gpa) catch |err| {
                 switch (err) {
                     ops.OpError.PathNotFound => {
@@ -638,7 +658,10 @@ fn execShorthand(gpa: Allocator, root: *ops.JsonValue, cmd: []const u8, stdout: 
                 }
             };
         } else {
-            const value: ops.JsonValue = .{ .string = try gpa.dupe(u8, rest) };
+            const value = parseValue(gpa, rest) catch |err| {
+                writeErrorFmt(gpa, io, "error: invalid value: {s}\n", .{rest});
+                return err;
+            };
             ops.set(root, path, value, gpa) catch |err| {
                 switch (err) {
                     ops.OpError.InvalidType => {
