@@ -92,7 +92,7 @@ pub fn main(init: std.process.Init) !u8 {
             }
             i = end;
         } else {
-            var root_mut = try readInput(gpa, file_path, io);
+            var root_mut = try readInput(gpa, file_path, io, false);
             try execShorthand(gpa, &root_mut, token, stdout_file, stderr_file, io);
             return 0;
         }
@@ -108,11 +108,26 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     if (commands[0].cmd == .get and cmd_count == 1) {
-        const root = try readInput(gpa, file_path, io);
+        const root = try readInput(gpa, file_path, io, false);
         return execGet(gpa, root, args[commands[0].args_start..commands[0].args_end], stdout_file, stderr_file, io);
     }
 
-    var root_mut = try readInput(gpa, file_path, io);
+    var has_set = false;
+    var has_push = false;
+    var push_to_root = false;
+    for (commands[0..cmd_count]) |info| {
+        if (info.cmd == .set) has_set = true;
+        if (info.cmd == .push) {
+            has_push = true;
+            const ca = args[info.args_start..info.args_end];
+            if (ca.len >= 1 and (ca[0].len == 0 or std.mem.eql(u8, ca[0], "."))) {
+                push_to_root = true;
+            }
+        }
+    }
+    const default_array = has_push and !has_set and push_to_root;
+
+    var root_mut = try readInput(gpa, file_path, io, default_array);
 
     var last_was_pretty = false;
     for (commands[0..cmd_count]) |info| {
@@ -212,29 +227,56 @@ fn readFileAlloc(gpa: Allocator, io: Io, path: []const u8) ![]const u8 {
     return try gpa.dupe(u8, aw.writer.buffer[0..aw.writer.end]);
 }
 
-fn readInput(gpa: Allocator, file_path: ?[]const u8, io: Io) !ops.JsonValue {
-    var input: ?[]const u8 = null;
-    defer if (input) |s| gpa.free(s);
-
+fn readInput(gpa: Allocator, file_path: ?[]const u8, io: Io, default_array: bool) !ops.JsonValue {
     if (file_path) |fp| {
-        input = readFileAlloc(gpa, io, fp) catch |err| {
+        const data = readFileAlloc(gpa, io, fp) catch |err| {
             writeErrorFmt(gpa, io, "error: cannot open file: {}\n", .{err});
             std.process.exit(1);
         };
-    } else {
-        var buf: [4096]u8 = undefined;
-        var file_reader = File.stdin().reader(io, &buf);
-        var aw = Writer.Allocating.init(gpa);
-        _ = file_reader.interface.streamRemaining(&aw.writer) catch {};
-        input = try gpa.dupe(u8, aw.writer.buffer[0..aw.writer.end]);
+        defer gpa.free(data);
+        if (data.len == 0) {
+            if (default_array) {
+                const arr: std.ArrayList(ops.JsonValue) = .empty;
+                return .{ .array = arr };
+            } else {
+                const obj: std.array_hash_map.String(ops.JsonValue) = .empty;
+                return .{ .object = obj };
+            }
+        }
+        return ops.parse(gpa, data) catch |err| {
+            writeErrorFmt(gpa, io, "error: parse error: {}\n", .{err});
+            std.process.exit(1);
+        };
     }
 
-    const data = input orelse "";
-    if (data.len == 0) {
-        const obj: std.array_hash_map.String(ops.JsonValue) = .empty;
-        return .{ .object = obj };
+    const is_tty = File.stdin().isTty(io) catch false;
+    if (is_tty) {
+        if (default_array) {
+            const arr: std.ArrayList(ops.JsonValue) = .empty;
+            return .{ .array = arr };
+        } else {
+            const obj: std.array_hash_map.String(ops.JsonValue) = .empty;
+            return .{ .object = obj };
+        }
     }
-    return ops.parse(gpa, data) catch |err| {
+
+    var buf: [4096]u8 = undefined;
+    var file_reader = File.stdin().reader(io, &buf);
+    var aw = Writer.Allocating.init(gpa);
+    _ = file_reader.interface.streamRemaining(&aw.writer) catch {};
+    const data = aw.writer.buffer[0..aw.writer.end];
+    if (data.len == 0) {
+        if (default_array) {
+            const arr: std.ArrayList(ops.JsonValue) = .empty;
+            return .{ .array = arr };
+        } else {
+            const obj: std.array_hash_map.String(ops.JsonValue) = .empty;
+            return .{ .object = obj };
+        }
+    }
+    const input = try gpa.dupe(u8, data);
+    defer gpa.free(input);
+    return ops.parse(gpa, input) catch |err| {
         writeErrorFmt(gpa, io, "error: parse error: {}\n", .{err});
         std.process.exit(1);
     };
@@ -284,7 +326,7 @@ fn execGet(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, st
         try File.writeStreamingAll(stderr, io, "error: 'get' requires a path\n");
         return 1;
     }
-    const path = cmd_args[0];
+    const path = normalizePath(cmd_args[0]);
     var is_raw = false;
     for (cmd_args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--raw")) is_raw = true;
@@ -333,6 +375,11 @@ fn execGet(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, st
     return 0;
 }
 
+fn normalizePath(path: []const u8) []const u8 {
+    if (std.mem.eql(u8, path, ".")) return "";
+    return path;
+}
+
 fn parseValue(gpa: Allocator, str: []const u8) !ops.JsonValue {
     if (str.len > 0 and (str[0] == '{' or str[0] == '[')) {
         return ops.parse(gpa, str);
@@ -348,7 +395,7 @@ fn execSet(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, s
     var auto_type = false;
     var i: usize = 0;
     while (i + 1 < cmd_args.len) {
-        const path = cmd_args[i];
+        const path = normalizePath(cmd_args[i]);
         const value_str = cmd_args[i + 1];
         if (std.mem.eql(u8, value_str, "--type") or std.mem.eql(u8, value_str, ":=")) {
             auto_type = true;
@@ -384,7 +431,7 @@ fn execDel(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, s
         try File.writeStreamingAll(stderr, io, "error: 'del' requires a path\n");
         return;
     }
-    ops.del(root, cmd_args[0], gpa) catch |err| {
+    ops.del(root, normalizePath(cmd_args[0]), gpa) catch |err| {
         switch (err) {
             ops.OpError.PathNotFound => {
                 writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{cmd_args[0]});
@@ -402,7 +449,7 @@ fn execPush(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, 
         try File.writeStreamingAll(stderr, io, "error: 'push' requires a path\n");
         return;
     }
-    const path = cmd_args[0];
+    const path = normalizePath(cmd_args[0]);
     const rest = cmd_args[1..];
     if (rest.len >= 2 and containsEquals(rest[0])) {
         var obj: std.array_hash_map.String(ops.JsonValue) = .empty;
@@ -491,7 +538,7 @@ fn execPop(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, s
         try File.writeStreamingAll(stderr, io, "error: 'pop' requires a path\n");
         return;
     }
-    const popped = ops.pop(root, cmd_args[0], gpa) catch |err| {
+    const popped = ops.pop(root, normalizePath(cmd_args[0]), gpa) catch |err| {
         switch (err) {
             ops.OpError.PathNotFound => {
                 writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{cmd_args[0]});
@@ -541,14 +588,15 @@ fn execType(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, s
         try File.writeStreamingAll(stderr, io, "error: 'type' requires a path\n");
         return 1;
     }
-    var result = ops.get(root, cmd_args[0], gpa) catch |err| {
+    const path = normalizePath(cmd_args[0]);
+    var result = ops.get(root, path, gpa) catch |err| {
         switch (err) {
             ops.OpError.PathNotFound => {
-                writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{cmd_args[0]});
+                writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
                 return 2;
             },
             ops.OpError.InvalidType => {
-                writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{cmd_args[0]});
+                writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
                 return 3;
             },
             else => return err,
