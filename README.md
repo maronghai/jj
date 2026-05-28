@@ -10,7 +10,7 @@
 - **高性能** — Zig 编译为原生代码，无 GC，启动 < 5ms
 - **shell-first** — 默认 stdin/stdout，天然可 pipe
 - **无 DSL** — 直接用 `jj set user.name abc`，不学新语法
-- **自动路径创建** — `jj set user.profile.name abc` 自动补全中间节点
+- **多指令链式执行** — `jj set a 1 del b push c v omit d` 一次操作多个命令
 - **类型推断** — `:=` 语法自动识别 number / bool / null
 
 ## 快速开始
@@ -67,6 +67,19 @@ echo '{"name":"abc"}' | jj compact
 
 # 合并
 echo '{"a":1}' | jj merge extra.json
+
+# 多指令链式操作（同一份 JSON 依次执行）
+echo '{"a":1,"b":2,"c":3}' | jj set d 4 del b omit c
+# => {"a":1,"d":"4"}
+
+echo '{}' | jj set a 1 push tags dev push tags staging del a
+# => {"tags":["dev","staging"]}
+
+echo '{"name":"test","secret":"xxx","token":"yyy"}' | jj omit secret token set status active pretty
+# => {
+#      "name": "test",
+#      "status": "active"
+#    }
 
 # 文件模式（等价于 cat + pipe）
 jj -f config.json set server.port 8080

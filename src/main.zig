@@ -7,7 +7,28 @@ const File = Io.File;
 const Dir = Io.Dir;
 const Writer = Io.Writer;
 
-const MAX_ARGS = 64;
+const MAX_ARGS = 128;
+
+const Cmd = enum {
+    set,
+    del,
+    push,
+    pop,
+    pick,
+    omit,
+    pretty,
+    compact,
+    type,
+    merge,
+    @"new",
+    get,
+};
+
+const CmdInfo = struct {
+    cmd: Cmd,
+    args_start: usize,
+    args_end: usize,
+};
 
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
@@ -50,60 +71,122 @@ pub fn main(init: std.process.Init) !u8 {
 
     const stdout_file = File.stdout();
     const stderr_file = File.stderr();
-    const cmd = args[cmd_start];
-    const cmd_args = args[cmd_start + 1 ..];
 
-    if (std.mem.eql(u8, cmd, "-n")) {
-        return cmdNew(gpa, cmd_args, stdout_file, stderr_file, io);
+    var commands: [32]CmdInfo = undefined;
+    var cmd_count: usize = 0;
+    var i: usize = cmd_start;
+
+    while (i < args.len) {
+        const token = args[i];
+        const maybe_cmd = parseCmdName(token);
+        if (maybe_cmd) |c| {
+            const start = i + 1;
+            i += 1;
+            var end = start;
+            while (end < args.len) : (end += 1) {
+                if (parseCmdName(args[end]) != null) break;
+            }
+            if (cmd_count < commands.len) {
+                commands[cmd_count] = .{ .cmd = c, .args_start = start, .args_end = end };
+                cmd_count += 1;
+            }
+            i = end;
+        } else {
+            var root_mut = try readInput(gpa, file_path, io);
+            try execShorthand(gpa, &root_mut, token, stdout_file, stderr_file, io);
+            return 0;
+        }
     }
 
-    const root = try readInput(gpa, file_path, io);
+    if (cmd_count == 0) {
+        try usage(File.stderr(), io);
+        return 1;
+    }
 
-    if (std.mem.eql(u8, cmd, "get")) {
-        return cmdGet(gpa, root, cmd_args, stdout_file, stderr_file, io);
-    } else if (std.mem.eql(u8, cmd, "set")) {
-        return cmdSet(gpa, root, cmd_args, stdout_file, stderr_file, io);
-    } else if (std.mem.eql(u8, cmd, "del")) {
-        return cmdDel(gpa, root, cmd_args, stdout_file, stderr_file, io);
-    } else if (std.mem.eql(u8, cmd, "push")) {
-        return cmdPush(gpa, root, cmd_args, stdout_file, stderr_file, io);
-    } else if (std.mem.eql(u8, cmd, "pop")) {
-        return cmdPop(gpa, root, cmd_args, stdout_file, stderr_file, io);
-    } else if (std.mem.eql(u8, cmd, "pick")) {
-        return cmdPick(gpa, root, cmd_args, stdout_file, stderr_file, io);
-    } else if (std.mem.eql(u8, cmd, "omit")) {
-        return cmdOmit(gpa, root, cmd_args, stdout_file, stderr_file, io);
-    } else if (std.mem.eql(u8, cmd, "pretty")) {
-        return cmdPretty(gpa, root, cmd_args, stdout_file, stderr_file, io);
-    } else if (std.mem.eql(u8, cmd, "compact")) {
-        return cmdCompact(gpa, root, cmd_args, stdout_file, stderr_file, io);
-    } else if (std.mem.eql(u8, cmd, "type")) {
-        return cmdType(gpa, root, cmd_args, stdout_file, stderr_file, io);
-    } else if (std.mem.eql(u8, cmd, "merge")) {
-        return cmdMerge(gpa, root, cmd_args, stdout_file, stderr_file, io);
+    if (commands[0].cmd == .@"new") {
+        return execNew(gpa, args[commands[0].args_start..commands[0].args_end], stdout_file, stderr_file, io);
+    }
+
+    if (commands[0].cmd == .get and cmd_count == 1) {
+        const root = try readInput(gpa, file_path, io);
+        return execGet(gpa, root, args[commands[0].args_start..commands[0].args_end], stdout_file, stderr_file, io);
+    }
+
+    var root_mut = try readInput(gpa, file_path, io);
+
+    var last_was_pretty = false;
+    for (commands[0..cmd_count]) |info| {
+        const cmd_args = args[info.args_start..info.args_end];
+        switch (info.cmd) {
+            .set => try execSet(gpa, &root_mut, cmd_args, stderr_file, io),
+            .del => try execDel(gpa, &root_mut, cmd_args, stderr_file, io),
+            .push => try execPush(gpa, &root_mut, cmd_args, stderr_file, io),
+            .pop => try execPop(gpa, &root_mut, cmd_args, stderr_file, io),
+            .pick => try execPick(gpa, &root_mut, cmd_args, stderr_file, io),
+            .omit => try execOmit(gpa, &root_mut, cmd_args, stderr_file, io),
+            .merge => try execMerge(gpa, &root_mut, cmd_args, io, stderr_file, io),
+            .pretty => last_was_pretty = true,
+            .compact => last_was_pretty = false,
+            .type => {
+                if (cmd_count == 1) {
+                    return execType(gpa, root_mut, cmd_args, stdout_file, stderr_file, io);
+                }
+            },
+            .@"new" => {},
+            .get => {
+                if (cmd_count == 1) {
+                    return execGet(gpa, root_mut, cmd_args, stdout_file, stderr_file, io);
+                }
+            },
+        }
+    }
+
+    if (last_was_pretty) {
+        try writeResultPretty(root_mut, gpa, stdout_file, io);
     } else {
-        var root_mut = root;
-        return cmdShorthand(gpa, &root_mut, cmd, cmd_args, stdout_file, stderr_file, io);
+        try writeResult(root_mut, gpa, stdout_file, io);
     }
+    return 0;
+}
+
+fn parseCmdName(token: []const u8) ?Cmd {
+    if (std.mem.eql(u8, token, "set")) return .set;
+    if (std.mem.eql(u8, token, "del")) return .del;
+    if (std.mem.eql(u8, token, "push")) return .push;
+    if (std.mem.eql(u8, token, "pop")) return .pop;
+    if (std.mem.eql(u8, token, "pick")) return .pick;
+    if (std.mem.eql(u8, token, "omit")) return .omit;
+    if (std.mem.eql(u8, token, "pretty")) return .pretty;
+    if (std.mem.eql(u8, token, "compact")) return .compact;
+    if (std.mem.eql(u8, token, "type")) return .type;
+    if (std.mem.eql(u8, token, "merge")) return .merge;
+    if (std.mem.eql(u8, token, "new")) return .@"new";
+    if (std.mem.eql(u8, token, "get")) return .get;
+    return null;
 }
 
 fn usage(stderr: File, io: Io) !void {
     try File.writeStreamingAll(stderr, io,
         \\jj - shell-first JSON CLI
         \\
-        \\Usage: jj <command> [args]
-        \\       jj -f <file> <command> [args]
+        \\Usage: jj <command> [args] [command> [args] ...
+        \\       jj -f <file> <command> [args] ...
         \\       jj <path>=<value>    (shorthand set string)
         \\       jj <path>:=<value>   (shorthand set auto-type)
         \\       jj <path>+=<value>   (shorthand array push)
         \\       jj <path>-           (shorthand delete)
         \\
+        \\Multiple commands can be chained:
+        \\  jj set a 1 del b push c v1 v2 omit d merge f
+        \\
         \\Commands:
         \\  new object|array       Create empty JSON
         \\  get <path> [--raw]     Get value at path
-        \\  set <path> <value>     Set value at path (string)
+        \\  set <p> <v> [p v]...   Set path=value pairs (string)
         \\  del <path>             Delete value at path
-        \\  push <path> [k=v...]   Push to array
+        \\  push <path> <v>...     Push values to array
+        \\  push <path> <k> <v>... Push object (even key-value pairs)
+        \\  push <path> <k=v>...   Push object (k=v syntax)
         \\  pop <path>             Pop from array
         \\  pick <key>...          Keep only specified keys
         \\  omit <key>...          Remove specified keys
@@ -177,7 +260,7 @@ fn writeResultPretty(root: ops.JsonValue, gpa: Allocator, stdout: File, io: Io) 
     try File.writeStreamingAll(stdout, io, aw.writer.buffer[0..aw.writer.end]);
 }
 
-fn cmdNew(gpa: Allocator, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
+fn execNew(gpa: Allocator, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
     if (cmd_args.len < 1) {
         try File.writeStreamingAll(stderr, io, "error: 'new' requires 'object' or 'array'\n");
         return 1;
@@ -196,7 +279,7 @@ fn cmdNew(gpa: Allocator, cmd_args: []const []const u8, stdout: File, stderr: Fi
     }
 }
 
-fn cmdGet(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
+fn execGet(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
     if (cmd_args.len < 1) {
         try File.writeStreamingAll(stderr, io, "error: 'get' requires a path\n");
         return 1;
@@ -250,187 +333,193 @@ fn cmdGet(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, std
     return 0;
 }
 
-fn cmdSet(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
+fn execSet(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, stderr: File, io: Io) !void {
     if (cmd_args.len < 2) {
-        try File.writeStreamingAll(stderr, io, "error: 'set' requires a path and a value\n");
-        return 1;
+        try File.writeStreamingAll(stderr, io, "error: 'set' requires path value pairs\n");
+        return;
     }
-    const path = cmd_args[0];
-    const value_str = cmd_args[1];
-    var value: ops.JsonValue = undefined;
     var auto_type = false;
-    if (cmd_args.len > 2) {
-        for (cmd_args[2..]) |arg| {
-            if (std.mem.eql(u8, arg, "--type") or std.mem.eql(u8, arg, ":=")) {
-                auto_type = true;
-                break;
+    var i: usize = 0;
+    while (i + 1 < cmd_args.len) {
+        const path = cmd_args[i];
+        const value_str = cmd_args[i + 1];
+        if (std.mem.eql(u8, value_str, "--type") or std.mem.eql(u8, value_str, ":=")) {
+            auto_type = true;
+            i += 2;
+            continue;
+        }
+        var value: ops.JsonValue = undefined;
+        if (auto_type) {
+            value = ops.inferType(value_str);
+            if (value == .string) {
+                value = .{ .string = try gpa.dupe(u8, value.string) };
             }
+        } else {
+            value = .{ .string = try gpa.dupe(u8, value_str) };
         }
+        ops.set(root, path, value, gpa) catch |err| {
+            switch (err) {
+                ops.OpError.InvalidType, ops.OpError.InvalidPath => {
+                    writeErrorFmt(gpa, io, "error: invalid type/path: {s}\n", .{path});
+                },
+                else => return err,
+            }
+        };
+        i += 2;
     }
-    if (auto_type) {
-        value = ops.inferType(value_str);
-    } else {
-        value = .{ .string = value_str };
-    }
-    var root_mut = root;
-    ops.set(&root_mut, path, value, gpa) catch |err| {
-        switch (err) {
-            ops.OpError.InvalidType, ops.OpError.InvalidPath => {
-                writeErrorFmt(gpa, io, "error: invalid type/path: {s}\n", .{path});
-                return 3;
-            },
-            else => return err,
-        }
-    };
-    try writeResult(root_mut, gpa, stdout, io);
-    return 0;
 }
 
-fn cmdDel(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
+fn execDel(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, stderr: File, io: Io) !void {
     if (cmd_args.len < 1) {
         try File.writeStreamingAll(stderr, io, "error: 'del' requires a path\n");
-        return 1;
+        return;
     }
-    var root_mut = root;
-    ops.del(&root_mut, cmd_args[0], gpa) catch |err| {
+    ops.del(root, cmd_args[0], gpa) catch |err| {
         switch (err) {
             ops.OpError.PathNotFound => {
                 writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{cmd_args[0]});
-                return 2;
             },
             ops.OpError.InvalidType => {
                 writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{cmd_args[0]});
-                return 3;
             },
             else => return err,
         }
     };
-    try writeResult(root_mut, gpa, stdout, io);
-    return 0;
 }
 
-fn cmdPush(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
+fn execPush(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, stderr: File, io: Io) !void {
     if (cmd_args.len < 1) {
         try File.writeStreamingAll(stderr, io, "error: 'push' requires a path\n");
-        return 1;
+        return;
     }
     const path = cmd_args[0];
-    var root_mut = root;
-
-    var value: ops.JsonValue = undefined;
-    if (cmd_args.len >= 3 and containsEquals(cmd_args[1])) {
+    const rest = cmd_args[1..];
+    if (rest.len >= 2 and containsEquals(rest[0])) {
         var obj: std.array_hash_map.String(ops.JsonValue) = .empty;
-        for (cmd_args[1..]) |kv| {
+        for (rest) |kv| {
             if (std.mem.indexOfScalar(u8, kv, '=')) |eq_pos| {
                 const k = kv[0..eq_pos];
                 const v = kv[eq_pos + 1 ..];
                 const key_dup = try gpa.dupe(u8, k);
-                try obj.put(gpa, key_dup, .{ .string = v });
+                const val_dup = try gpa.dupe(u8, v);
+                try obj.put(gpa, key_dup, .{ .string = val_dup });
             }
         }
-        value = .{ .object = obj };
-    } else if (cmd_args.len >= 2) {
-        value = .{ .string = cmd_args[1] };
-    } else {
-        value = .null;
-    }
-
-    ops.push(&root_mut, path, value, gpa) catch |err| {
-        switch (err) {
-            ops.OpError.PathNotFound => {
-                writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
-                return 2;
-            },
-            ops.OpError.InvalidType => {
-                writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
-                return 3;
-            },
-            else => return err,
+        ops.push(root, path, .{ .object = obj }, gpa) catch |err| {
+            switch (err) {
+                ops.OpError.PathNotFound => {
+                    writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
+                },
+                ops.OpError.InvalidType => {
+                    writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
+                },
+                else => return err,
+            }
+        };
+    } else if (rest.len >= 2 and rest.len % 2 == 0 and !containsEquals(rest[0])) {
+        var obj: std.array_hash_map.String(ops.JsonValue) = .empty;
+        var j: usize = 0;
+        while (j + 1 < rest.len) : (j += 2) {
+            const key_dup = try gpa.dupe(u8, rest[j]);
+            const val_dup = try gpa.dupe(u8, rest[j + 1]);
+            try obj.put(gpa, key_dup, .{ .string = val_dup });
         }
-    };
-    try writeResult(root_mut, gpa, stdout, io);
-    return 0;
+        ops.push(root, path, .{ .object = obj }, gpa) catch |err| {
+            switch (err) {
+                ops.OpError.PathNotFound => {
+                    writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
+                },
+                ops.OpError.InvalidType => {
+                    writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
+                },
+                else => return err,
+            }
+        };
+    } else if (rest.len >= 1) {
+        for (rest) |val_str| {
+            const val_dup = try gpa.dupe(u8, val_str);
+            ops.push(root, path, .{ .string = val_dup }, gpa) catch |err| {
+                switch (err) {
+                    ops.OpError.PathNotFound => {
+                        writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
+                    },
+                    ops.OpError.InvalidType => {
+                        writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
+                    },
+                    else => return err,
+                }
+            };
+        }
+    } else {
+        ops.push(root, path, .null, gpa) catch |err| {
+            switch (err) {
+                ops.OpError.PathNotFound => {
+                    writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
+                },
+                ops.OpError.InvalidType => {
+                    writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
+                },
+                else => return err,
+            }
+        };
+    }
 }
 
 fn containsEquals(s: []const u8) bool {
     return std.mem.indexOfScalar(u8, s, '=') != null;
 }
 
-fn cmdPop(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
+fn execPop(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, stderr: File, io: Io) !void {
     if (cmd_args.len < 1) {
         try File.writeStreamingAll(stderr, io, "error: 'pop' requires a path\n");
-        return 1;
+        return;
     }
-    var root_mut = root;
-    const popped = ops.pop(&root_mut, cmd_args[0], gpa) catch |err| {
+    const popped = ops.pop(root, cmd_args[0], gpa) catch |err| {
         switch (err) {
             ops.OpError.PathNotFound => {
                 writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{cmd_args[0]});
-                return 2;
             },
             ops.OpError.InvalidType => {
                 writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{cmd_args[0]});
-                return 3;
             },
             else => return err,
         }
+        return;
     };
-    try writeResult(root_mut, gpa, stdout, io);
     _ = popped;
-    return 0;
 }
 
-fn cmdPick(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
+fn execPick(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, stderr: File, io: Io) !void {
     if (cmd_args.len < 1) {
         try File.writeStreamingAll(stderr, io, "error: 'pick' requires at least one key\n");
-        return 1;
+        return;
     }
-    var root_mut = root;
-    ops.pick(&root_mut, cmd_args, gpa) catch |err| {
+    ops.pick(root, cmd_args, gpa) catch |err| {
         switch (err) {
             ops.OpError.InvalidType => {
                 try File.writeStreamingAll(stderr, io, "error: pick requires an object\n");
-                return 3;
             },
             else => return err,
         }
     };
-    try writeResult(root_mut, gpa, stdout, io);
-    return 0;
 }
 
-fn cmdOmit(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
+fn execOmit(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, stderr: File, io: Io) !void {
     if (cmd_args.len < 1) {
         try File.writeStreamingAll(stderr, io, "error: 'omit' requires at least one key\n");
-        return 1;
+        return;
     }
-    var root_mut = root;
-    ops.omit(&root_mut, cmd_args, gpa) catch |err| {
+    ops.omit(root, cmd_args, gpa) catch |err| {
         switch (err) {
             ops.OpError.InvalidType => {
                 try File.writeStreamingAll(stderr, io, "error: omit requires an object\n");
-                return 3;
             },
             else => return err,
         }
     };
-    try writeResult(root_mut, gpa, stdout, io);
-    return 0;
 }
 
-fn cmdPretty(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, stdout: File, _: File, io: Io) !u8 {
-    _ = cmd_args;
-    try writeResultPretty(root, gpa, stdout, io);
-    return 0;
-}
-
-fn cmdCompact(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, stdout: File, _: File, io: Io) !u8 {
-    _ = cmd_args;
-    try writeResult(root, gpa, stdout, io);
-    return 0;
-}
-
-fn cmdType(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
+fn execType(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
     if (cmd_args.len < 1) {
         try File.writeStreamingAll(stderr, io, "error: 'type' requires a path\n");
         return 1;
@@ -455,24 +544,23 @@ fn cmdType(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, st
     return 0;
 }
 
-fn cmdMerge(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
+fn execMerge(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, io: Io, stderr: File, _: Io) !void {
     if (cmd_args.len < 1) {
         try File.writeStreamingAll(stderr, io, "error: 'merge' requires a file path\n");
-        return 1;
+        return;
     }
     const merge_input = readFileAlloc(gpa, io, cmd_args[0]) catch |err| {
         writeErrorFmt(gpa, io, "error: cannot open file: {}\n", .{err});
-        return 1;
+        return;
     };
     defer gpa.free(merge_input);
 
     const other = ops.parse(gpa, merge_input) catch |err| {
         writeErrorFmt(gpa, io, "error: parse error in merge file: {}\n", .{err});
-        return 1;
+        return;
     };
 
-    var root_mut = root;
-    switch (root_mut) {
+    switch (root.*) {
         .object => |*obj| {
             switch (other) {
                 .object => |other_obj| {
@@ -490,24 +578,19 @@ fn cmdMerge(gpa: Allocator, root: ops.JsonValue, cmd_args: []const []const u8, s
                 },
                 else => {
                     try File.writeStreamingAll(stderr, io, "error: merge source must be an object\n");
-                    return 3;
                 },
             }
         },
         else => {
             try File.writeStreamingAll(stderr, io, "error: merge target must be an object\n");
-            return 3;
         },
     }
-    try writeResult(root_mut, gpa, stdout, io);
-    return 0;
 }
 
-fn cmdShorthand(gpa: Allocator, root: *ops.JsonValue, cmd: []const u8, cmd_args: []const []const u8, stdout: File, stderr: File, io: Io) !u8 {
-    _ = cmd_args;
+fn execShorthand(gpa: Allocator, root: *ops.JsonValue, cmd: []const u8, stdout: File, stderr: File, io: Io) !void {
     if (cmd.len == 0) {
         try File.writeStreamingAll(stderr, io, "error: unknown command\n");
-        return 1;
+        return;
     }
     const last = cmd[cmd.len - 1];
     if (last == '-') {
@@ -516,60 +599,57 @@ fn cmdShorthand(gpa: Allocator, root: *ops.JsonValue, cmd: []const u8, cmd_args:
             switch (err) {
                 ops.OpError.PathNotFound => {
                     writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
-                    return 2;
                 },
                 else => return err,
             }
         };
         try writeResult(root.*, gpa, stdout, io);
-        return 0;
+        return;
     }
     if (std.mem.indexOfScalar(u8, cmd, '=')) |eq_pos| {
         const path = cmd[0..eq_pos];
         const rest = cmd[eq_pos + 1 ..];
         if (eq_pos > 0 and cmd[eq_pos - 1] == ':') {
             const actual_path = cmd[0 .. eq_pos - 1];
-            const value = ops.inferType(rest);
+            var value = ops.inferType(rest);
+            if (value == .string) {
+                value = .{ .string = try gpa.dupe(u8, value.string) };
+            }
             ops.set(root, actual_path, value, gpa) catch |err| {
                 switch (err) {
                     ops.OpError.InvalidType => {
                         writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{actual_path});
-                        return 3;
                     },
                     else => return err,
                 }
             };
         } else if (eq_pos > 0 and cmd[eq_pos - 1] == '+') {
             const actual_path = cmd[0 .. eq_pos - 1];
-            const value: ops.JsonValue = .{ .string = rest };
+            const value: ops.JsonValue = .{ .string = try gpa.dupe(u8, rest) };
             ops.push(root, actual_path, value, gpa) catch |err| {
                 switch (err) {
                     ops.OpError.PathNotFound => {
                         writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{actual_path});
-                        return 2;
                     },
                     ops.OpError.InvalidType => {
                         writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{actual_path});
-                        return 3;
                     },
                     else => return err,
                 }
             };
         } else {
-            const value: ops.JsonValue = .{ .string = rest };
+            const value: ops.JsonValue = .{ .string = try gpa.dupe(u8, rest) };
             ops.set(root, path, value, gpa) catch |err| {
                 switch (err) {
                     ops.OpError.InvalidType => {
                         writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
-                        return 3;
                     },
                     else => return err,
                 }
             };
         }
         try writeResult(root.*, gpa, stdout, io);
-        return 0;
+        return;
     }
     writeErrorFmt(gpa, io, "error: unknown command: {s}\n", .{cmd});
-    return 1;
 }

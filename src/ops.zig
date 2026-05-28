@@ -12,7 +12,8 @@ pub const JsonValue = union(enum) {
 
     pub fn deinit(self: *JsonValue, gpa: Allocator) void {
         switch (self.*) {
-            .null, .boolean, .integer, .number, .string => {},
+            .null, .boolean, .integer, .number => {},
+            .string => |s| gpa.free(s),
             .array => |*arr| {
                 for (arr.items) |*item| {
                     item.deinit(gpa);
@@ -22,6 +23,7 @@ pub const JsonValue = union(enum) {
             .object => |*obj| {
                 var iter = obj.iterator();
                 while (iter.next()) |entry| {
+                    gpa.free(entry.key_ptr.*);
                     var val = entry.value_ptr.*;
                     val.deinit(gpa);
                 }
@@ -317,7 +319,9 @@ const JsonParser = struct {
             const ch = self.input[self.pos];
             if (ch == '"') {
                 self.pos += 1;
-                return .{ .string = buf.items };
+                const result = try self.gpa.dupe(u8, buf.items);
+                buf.deinit(self.gpa);
+                return .{ .string = result };
             }
             if (ch == '\\') {
                 self.pos += 1;
@@ -406,7 +410,7 @@ const JsonParser = struct {
             if (existing) |old| {
                 var old_val = old.value;
                 old_val.deinit(self.gpa);
-                self.gpa.free(old.key);
+                self.gpa.free(key);
             }
             if (self.consume(',')) continue;
             if (self.consume('}')) return .{ .object = obj };
