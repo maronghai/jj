@@ -114,18 +114,11 @@ pub fn main(init: std.process.Init) !u8 {
 
     var has_set = false;
     var has_push = false;
-    var push_to_root = false;
     for (commands[0..cmd_count]) |info| {
         if (info.cmd == .set) has_set = true;
-        if (info.cmd == .push) {
-            has_push = true;
-            const ca = args[info.args_start..info.args_end];
-            if (ca.len >= 1 and (ca[0].len == 0 or std.mem.eql(u8, ca[0], "."))) {
-                push_to_root = true;
-            }
-        }
+        if (info.cmd == .push) has_push = true;
     }
-    const default_array = has_push and !has_set and push_to_root;
+    const default_array = has_push and !has_set;
 
     var root_mut = try readInput(gpa, file_path, io, default_array);
 
@@ -413,16 +406,20 @@ fn execSet(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, s
             var json_buf: std.ArrayList(u8) = .empty;
             defer json_buf.deinit(gpa);
             try json_buf.appendSlice(gpa, value_str);
-            var j: usize = i + 2;
-            while (j < cmd_args.len) : (j += 1) {
+            var json_end: usize = i + 2;
+            while (json_end < cmd_args.len) {
+                if (ops.parse(gpa, json_buf.items)) |_| {
+                    break;
+                } else |_| {}
                 try json_buf.append(gpa, ' ');
-                try json_buf.appendSlice(gpa, cmd_args[j]);
+                try json_buf.appendSlice(gpa, cmd_args[json_end]);
+                json_end += 1;
             }
             value = ops.parse(gpa, json_buf.items) catch |err| {
                 writeErrorFmt(gpa, io, "error: invalid JSON value: {s}\n", .{json_buf.items});
                 return err;
             };
-            i = cmd_args.len;
+            i = json_end;
         } else {
             value = parseValue(gpa, value_str) catch |err| {
                 writeErrorFmt(gpa, io, "error: invalid value: {s}\n", .{value_str});
@@ -461,104 +458,249 @@ fn execDel(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, s
 
 fn execPush(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, stderr: File, io: Io) !void {
     if (cmd_args.len < 1) {
-        try File.writeStreamingAll(stderr, io, "error: 'push' requires a path\n");
+        try File.writeStreamingAll(stderr, io, "error: 'push' requires at least one value\n");
         return;
     }
-    const path = normalizePath(cmd_args[0]);
-    const rest = cmd_args[1..];
-    if (rest.len >= 2 and containsEquals(rest[0])) {
-        var obj: std.array_hash_map.String(ops.JsonValue) = .empty;
-        for (rest) |kv| {
-            if (std.mem.indexOfScalar(u8, kv, '=')) |eq_pos| {
-                const k = kv[0..eq_pos];
-                const v = kv[eq_pos + 1 ..];
-                const key_dup = try gpa.dupe(u8, k);
-                const val_dup = try gpa.dupe(u8, v);
-                try obj.put(gpa, key_dup, .{ .string = val_dup });
-            }
-        }
-        ops.push(root, path, .{ .object = obj }, gpa) catch |err| {
-            switch (err) {
-                ops.OpError.PathNotFound => {
-                    writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
-                },
-                ops.OpError.InvalidType => {
-                    writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
-                },
-                else => return err,
-            }
-        };
-    } else if (rest.len >= 2 and rest.len % 2 == 0 and !containsEquals(rest[0]) and !looksLikeJson(rest[0])) {
-        var obj: std.array_hash_map.String(ops.JsonValue) = .empty;
-        var j: usize = 0;
-        while (j + 1 < rest.len) : (j += 2) {
-            const key_dup = try gpa.dupe(u8, rest[j]);
-            const val_dup = try gpa.dupe(u8, rest[j + 1]);
-            try obj.put(gpa, key_dup, .{ .string = val_dup });
-        }
-        ops.push(root, path, .{ .object = obj }, gpa) catch |err| {
-            switch (err) {
-                ops.OpError.PathNotFound => {
-                    writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
-                },
-                ops.OpError.InvalidType => {
-                    writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
-                },
-                else => return err,
-            }
-        };
-    } else if (rest.len >= 1 and looksLikeJson(rest[0])) {
-        var json_buf: std.ArrayList(u8) = .empty;
-        defer json_buf.deinit(gpa);
-        for (rest, 0..) |val_str, idx| {
-            if (idx > 0) try json_buf.append(gpa, ' ');
-            try json_buf.appendSlice(gpa, val_str);
-        }
-        const value = ops.parse(gpa, json_buf.items) catch |err| {
-            writeErrorFmt(gpa, io, "error: invalid JSON value: {s}\n", .{json_buf.items});
-            return err;
-        };
-        ops.push(root, path, value, gpa) catch |err| {
-            switch (err) {
-                ops.OpError.PathNotFound => {
-                    writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
-                },
-                ops.OpError.InvalidType => {
-                    writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
-                },
-                else => return err,
-            }
-        };
-    } else if (rest.len >= 1) {
-        for (rest) |val_str| {
-            const value = parseValue(gpa, val_str) catch |err| {
-                writeErrorFmt(gpa, io, "error: invalid value: {s}\n", .{val_str});
-                return err;
-            };
-            ops.push(root, path, value, gpa) catch |err| {
+
+    const push_object = cmd_args[0].len == 0 or std.mem.eql(u8, cmd_args[0], ".");
+    const is_root_array = root.* == .array;
+
+    if (push_object and is_root_array) {
+        const path: []const u8 = "";
+        const rest = cmd_args[1..];
+        if (rest.len == 0) {
+            ops.push(root, path, .null, gpa) catch |err| {
                 switch (err) {
-                    ops.OpError.PathNotFound => {
-                        writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
-                    },
-                    ops.OpError.InvalidType => {
-                        writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
+                    ops.OpError.PathNotFound => writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path}),
+                    ops.OpError.InvalidType => writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path}),
+                    else => return err,
+                }
+            };
+            return;
+        }
+        var obj: std.array_hash_map.String(ops.JsonValue) = .empty;
+        errdefer {
+            var it = obj.iterator();
+            while (it.next()) |e| {
+                gpa.free(e.key_ptr.*);
+                var v = e.value_ptr.*;
+                v.deinit(gpa);
+            }
+            obj.deinit(gpa);
+        }
+        var k: usize = 0;
+        while (k + 1 < rest.len) {
+            const key = rest[k];
+            const val_str = rest[k + 1];
+            const key_dup = try gpa.dupe(u8, key);
+            var val: ops.JsonValue = undefined;
+            if (looksLikeJson(val_str)) {
+                var json_buf: std.ArrayList(u8) = .empty;
+                defer json_buf.deinit(gpa);
+                try json_buf.appendSlice(gpa, val_str);
+                var j: usize = k + 2;
+                while (j < rest.len) {
+                    if (ops.parse(gpa, json_buf.items)) |_| break else |_| {}
+                    try json_buf.append(gpa, ' ');
+                    try json_buf.appendSlice(gpa, rest[j]);
+                    j += 1;
+                }
+                val = ops.parse(gpa, json_buf.items) catch |err| {
+                    writeErrorFmt(gpa, io, "error: invalid JSON value: {s}\n", .{json_buf.items});
+                    return err;
+                };
+                k = j;
+            } else {
+                val = ops.inferType(val_str);
+                if (val == .string) {
+                    val = .{ .string = try gpa.dupe(u8, val.string) };
+                }
+                k += 2;
+            }
+            try obj.put(gpa, key_dup, val);
+        }
+        if (k < rest.len and obj.count() == 0) {
+            const val_str = rest[k];
+            if (looksLikeJson(val_str)) {
+                var json_buf: std.ArrayList(u8) = .empty;
+                defer json_buf.deinit(gpa);
+                for (rest[k..], 0..) |s, idx| {
+                    if (idx > 0) try json_buf.append(gpa, ' ');
+                    try json_buf.appendSlice(gpa, s);
+                }
+                const val = ops.parse(gpa, json_buf.items) catch |err| {
+                    writeErrorFmt(gpa, io, "error: invalid JSON value: {s}\n", .{json_buf.items});
+                    return err;
+                };
+                ops.push(root, path, val, gpa) catch |err| {
+                    switch (err) {
+                        ops.OpError.PathNotFound => writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path}),
+                        ops.OpError.InvalidType => writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path}),
+                        else => return err,
+                    }
+                };
+                return;
+            }
+        }
+        ops.push(root, path, .{ .object = obj }, gpa) catch |err| {
+            switch (err) {
+                ops.OpError.PathNotFound => writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path}),
+                ops.OpError.InvalidType => writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path}),
+                else => return err,
+            }
+        };
+        return;
+    }
+
+    if (push_object and !is_root_array) {
+        const rest = cmd_args[1..];
+        var k: usize = 0;
+        while (k + 1 < rest.len) {
+            const key = rest[k];
+            const val_str = rest[k + 1];
+            var val: ops.JsonValue = undefined;
+            if (looksLikeJson(val_str)) {
+                var json_buf: std.ArrayList(u8) = .empty;
+                defer json_buf.deinit(gpa);
+                try json_buf.appendSlice(gpa, val_str);
+                var j: usize = k + 2;
+                while (j < rest.len) {
+                    if (ops.parse(gpa, json_buf.items)) |_| break else |_| {}
+                    try json_buf.append(gpa, ' ');
+                    try json_buf.appendSlice(gpa, rest[j]);
+                    j += 1;
+                }
+                val = ops.parse(gpa, json_buf.items) catch |err| {
+                    writeErrorFmt(gpa, io, "error: invalid JSON value: {s}\n", .{json_buf.items});
+                    return err;
+                };
+                k = j;
+            } else {
+                val = ops.inferType(val_str);
+                if (val == .string) {
+                    val = .{ .string = try gpa.dupe(u8, val.string) };
+                }
+                k += 2;
+            }
+            ops.set(root, key, val, gpa) catch |err| {
+                switch (err) {
+                    ops.OpError.InvalidType, ops.OpError.InvalidPath => {
+                        writeErrorFmt(gpa, io, "error: invalid type/path: {s}\n", .{key});
                     },
                     else => return err,
                 }
             };
         }
-    } else {
+        return;
+    }
+
+    const path: []const u8 = if (is_root_array) "" else normalizePath(cmd_args[0]);
+    const rest = if (is_root_array) cmd_args[0..] else cmd_args[1..];
+
+    if (rest.len == 0) {
         ops.push(root, path, .null, gpa) catch |err| {
             switch (err) {
-                ops.OpError.PathNotFound => {
-                    writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
-                },
-                ops.OpError.InvalidType => {
-                    writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
-                },
+                ops.OpError.PathNotFound => writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path}),
+                ops.OpError.InvalidType => writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path}),
                 else => return err,
             }
         };
+        return;
+    }
+
+    if (rest.len >= 2 and containsEquals(rest[0])) {
+        var obj: std.array_hash_map.String(ops.JsonValue) = .empty;
+        for (rest) |kv| {
+            if (std.mem.indexOfScalar(u8, kv, '=')) |eq_pos| {
+                const key_dup = try gpa.dupe(u8, kv[0..eq_pos]);
+                const val = ops.inferType(kv[eq_pos + 1 ..]);
+                const val_owned: ops.JsonValue = if (val == .string) .{ .string = try gpa.dupe(u8, val.string) } else val;
+                try obj.put(gpa, key_dup, val_owned);
+            }
+        }
+        ops.push(root, path, .{ .object = obj }, gpa) catch |err| {
+            switch (err) {
+                ops.OpError.PathNotFound => writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path}),
+                ops.OpError.InvalidType => writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path}),
+                else => return err,
+            }
+        };
+    } else if (looksLikeJson(rest[0])) {
+        var k: usize = 0;
+        while (k < rest.len) {
+            if (!looksLikeJson(rest[k])) {
+                var val = ops.inferType(rest[k]);
+                if (val == .string) val = .{ .string = try gpa.dupe(u8, val.string) };
+                ops.push(root, path, val, gpa) catch |err| {
+                    switch (err) {
+                        ops.OpError.PathNotFound => writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path}),
+                        ops.OpError.InvalidType => writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path}),
+                        else => return err,
+                    }
+                };
+                k += 1;
+                continue;
+            }
+            var json_buf: std.ArrayList(u8) = .empty;
+            defer json_buf.deinit(gpa);
+            try json_buf.appendSlice(gpa, rest[k]);
+            k += 1;
+            while (k < rest.len) {
+                if (ops.parse(gpa, json_buf.items)) |_| break else |_| {}
+                try json_buf.append(gpa, ' ');
+                try json_buf.appendSlice(gpa, rest[k]);
+                k += 1;
+            }
+            const value = ops.parse(gpa, json_buf.items) catch |err| {
+                writeErrorFmt(gpa, io, "error: invalid JSON value: {s}\n", .{json_buf.items});
+                return err;
+            };
+            ops.push(root, path, value, gpa) catch |err| {
+                switch (err) {
+                    ops.OpError.PathNotFound => writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path}),
+                    ops.OpError.InvalidType => writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path}),
+                    else => return err,
+                }
+            };
+        }
+    } else {
+        var m: usize = 0;
+        while (m < rest.len) {
+            if (looksLikeJson(rest[m])) {
+                var json_buf: std.ArrayList(u8) = .empty;
+                defer json_buf.deinit(gpa);
+                try json_buf.appendSlice(gpa, rest[m]);
+                m += 1;
+                while (m < rest.len) {
+                    if (ops.parse(gpa, json_buf.items)) |_| break else |_| {}
+                    try json_buf.append(gpa, ' ');
+                    try json_buf.appendSlice(gpa, rest[m]);
+                    m += 1;
+                }
+                const value = ops.parse(gpa, json_buf.items) catch |err| {
+                    writeErrorFmt(gpa, io, "error: invalid JSON value: {s}\n", .{json_buf.items});
+                    return err;
+                };
+                ops.push(root, path, value, gpa) catch |err| {
+                    switch (err) {
+                        ops.OpError.PathNotFound => writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path}),
+                        ops.OpError.InvalidType => writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path}),
+                        else => return err,
+                    }
+                };
+            } else {
+                var val = ops.inferType(rest[m]);
+                if (val == .string) val = .{ .string = try gpa.dupe(u8, val.string) };
+                ops.push(root, path, val, gpa) catch |err| {
+                    switch (err) {
+                        ops.OpError.PathNotFound => writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path}),
+                        ops.OpError.InvalidType => writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path}),
+                        else => return err,
+                    }
+                };
+                m += 1;
+            }
+        }
     }
 }
 
