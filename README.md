@@ -120,7 +120,7 @@ echo '{"a":1}' | jj push . b 2
 echo '{}' | jj push .items name widget count 5
 # => {"items":[{"name":"widget","count":5}]}
 
-# 传统 key=value 语法仍然支持
+# 传统 key=value 语法仍然支持 TODO
 echo '{}' | jj push history role=user content=hello
 # => {"history":[{"role":"user","content":"hello"}]}
 
@@ -238,7 +238,7 @@ echo '{"name":"test","secret":"xxx","token":"yyy"}' | jj omit secret token set s
 .a.b                  等价 a.b
 user.name             对象字段
 history.0.role        数组索引
-items.-               末尾元素（- = last）
+items.-               末尾元素（- = last） TODO
 ```
 
 normalizePath 规则：`.` → `""`，`.a` → `a`，`.a.b` → `a.b`，`a.b` → `a.b`

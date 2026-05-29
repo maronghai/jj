@@ -3,3 +3,12 @@ jj set a 1 b 2   # { "a": 1, "b": 2 }
 jj set a 1 b $(jj set bb 22) c $(jj set cc 33)  # { "a": 1, "bb": 22, "cc": 33 }
 
 jj set a 1 b $(jj set bb 22 --json) c $(jj set cc 33 --json)  # { "a": 1, "bb": 22, "cc": 33 }
+
+
+jj push a b c
+# ["a","b","c"]
+
+jj push .a b c
+# {"a":[{"b":"c"}]}
+
+jj set a [] push a b c d e
