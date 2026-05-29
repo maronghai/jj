@@ -864,3 +864,543 @@ test "push multiple strings via ops" {
     defer gpa.free(out);
     try std.testing.expectEqualStrings("{\"tags\":[\"a\",\"b\",\"c\"]}", out);
 }
+
+test "parse zero" {
+    const gpa = std.testing.allocator;
+    var val = try ops.parse(gpa, "0");
+    defer val.deinit(gpa);
+    try std.testing.expect(val == .integer and val.integer == 0);
+}
+
+test "parse negative float" {
+    const gpa = std.testing.allocator;
+    var val = try ops.parse(gpa, "-2.5");
+    defer val.deinit(gpa);
+    try std.testing.expect(val == .number);
+    try std.testing.expectApproxEqAbs(-2.5, val.number, 1e-10);
+}
+
+test "parse string with forward slash escape" {
+    const gpa = std.testing.allocator;
+    var val = try ops.parse(gpa, "\"a\\/b\"");
+    defer val.deinit(gpa);
+    try std.testing.expect(val == .string);
+    try std.testing.expectEqualStrings("a/b", val.string);
+}
+
+test "parse string with backspace and formfeed" {
+    const gpa = std.testing.allocator;
+    var val = try ops.parse(gpa, "\"\\b\\f\"");
+    defer val.deinit(gpa);
+    try std.testing.expect(val == .string);
+    try std.testing.expectEqualStrings(&[_]u8{ 0x08, 0x0c }, val.string);
+}
+
+test "parse nested arrays" {
+    const gpa = std.testing.allocator;
+    var val = try ops.parse(gpa, "[[1,2],[3,4]]");
+    defer val.deinit(gpa);
+    try std.testing.expect(val == .array);
+    try std.testing.expectEqual(@as(usize, 2), val.array.items.len);
+    try std.testing.expect(val.array.items[0] == .array);
+    try std.testing.expectEqual(@as(usize, 2), val.array.items[0].array.items.len);
+    try std.testing.expect(val.array.items[0].array.items[0] == .integer and val.array.items[0].array.items[0].integer == 1);
+}
+
+test "parse object with trailing comma rejected" {
+    const gpa = std.testing.allocator;
+    const result = ops.parse(gpa, "{\"a\":1,}");
+    try std.testing.expectError(ops.ParseError.InvalidJson, result);
+}
+
+test "parse array with trailing comma rejected" {
+    const gpa = std.testing.allocator;
+    const result = ops.parse(gpa, "[1,]");
+    try std.testing.expectError(ops.ParseError.InvalidJson, result);
+}
+
+test "parse incomplete string" {
+    const gpa = std.testing.allocator;
+    const result = ops.parse(gpa, "\"hello");
+    try std.testing.expectError(ops.ParseError.InvalidJson, result);
+}
+
+test "parse incomplete escape" {
+    const gpa = std.testing.allocator;
+    const result = ops.parse(gpa, "\"\\u00\"");
+    try std.testing.expectError(ops.ParseError.InvalidJson, result);
+}
+
+test "writeTo nested array" {
+    const gpa = std.testing.allocator;
+    var val = try ops.parse(gpa, "[[1,2],[3]]");
+    defer val.deinit(gpa);
+    const out = try serialize(gpa, val);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("[[1,2],[3]]", out);
+}
+
+test "writeTo control character" {
+    const gpa = std.testing.allocator;
+    const s = try gpa.dupe(u8, &[_]u8{0x01});
+    var val: JsonValue = .{ .string = s };
+    const out = try serialize(gpa, val);
+    defer {
+        gpa.free(out);
+        val.deinit(gpa);
+    }
+    try std.testing.expectEqualStrings("\"\\u0001\"", out);
+}
+
+test "writeTo nan" {
+    const gpa = std.testing.allocator;
+    const out = try serialize(gpa, .{ .number = std.math.nan(f64) });
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("null", out);
+}
+
+test "writeTo infinity" {
+    const gpa = std.testing.allocator;
+    const out = try serialize(gpa, .{ .number = std.math.inf(f64) });
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("null", out);
+}
+
+test "writePretty array" {
+    const gpa = std.testing.allocator;
+    var val = try ops.parse(gpa, "[1,2,3]");
+    defer val.deinit(gpa);
+    const out = try serializePretty(gpa, val);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings(
+        \\[
+        \\  1,
+        \\  2,
+        \\  3
+        \\]
+    , out);
+}
+
+test "writePretty nested array in object" {
+    const gpa = std.testing.allocator;
+    var val = try ops.parse(gpa, "{\"x\":[1,2]}");
+    defer val.deinit(gpa);
+    const out = try serializePretty(gpa, val);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  "x": [
+        \\    1,
+        \\    2
+        \\  ]
+        \\}
+    , out);
+}
+
+test "clone null and bool" {
+    const gpa = std.testing.allocator;
+    var v_null: JsonValue = .null;
+    var c_null = try v_null.clone(gpa);
+    defer c_null.deinit(gpa);
+    try std.testing.expect(c_null == .null);
+    var v_bool: JsonValue = .{ .boolean = false };
+    var c_bool = try v_bool.clone(gpa);
+    defer c_bool.deinit(gpa);
+    try std.testing.expect(c_bool == .boolean and c_bool.boolean == false);
+}
+
+test "clone number" {
+    const gpa = std.testing.allocator;
+    var v: JsonValue = .{ .number = 2.5 };
+    var c = try v.clone(gpa);
+    defer c.deinit(gpa);
+    try std.testing.expect(c == .number);
+    try std.testing.expectApproxEqAbs(2.5, c.number, 1e-10);
+}
+
+test "parsePath numeric index" {
+    const gpa = std.testing.allocator;
+    var segs = try ops.parsePath(gpa, "0");
+    defer segs.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), segs.items.len);
+    try std.testing.expect(segs.items[0] == .index and segs.items[0].index == 0);
+}
+
+test "parsePath multi level" {
+    const gpa = std.testing.allocator;
+    var segs = try ops.parsePath(gpa, "a.b.0.c.-");
+    defer segs.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 5), segs.items.len);
+    try std.testing.expectEqualStrings("a", segs.items[0].key);
+    try std.testing.expectEqualStrings("b", segs.items[1].key);
+    try std.testing.expect(segs.items[2] == .index and segs.items[2].index == 0);
+    try std.testing.expectEqualStrings("c", segs.items[3].key);
+    try std.testing.expect(segs.items[4] == .index and segs.items[4].index == std.math.maxInt(usize));
+}
+
+test "parsePath invalid numeric" {
+    const gpa = std.testing.allocator;
+    const result = ops.parsePath(gpa, "0abc");
+    try std.testing.expectError(error.InvalidPath, result);
+}
+
+test "get from object key" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"x\":{\"y\":42}}");
+    defer root.deinit(gpa);
+    var val = try ops.get(root, "x.y", gpa);
+    defer val.deinit(gpa);
+    try std.testing.expect(val == .integer and val.integer == 42);
+}
+
+test "get array via dash" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"items\":[10,20,30]}");
+    defer root.deinit(gpa);
+    var val = try ops.get(root, "items.-", gpa);
+    defer val.deinit(gpa);
+    try std.testing.expect(val == .integer and val.integer == 30);
+}
+
+test "get returns clone" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":[1,2]}");
+    defer root.deinit(gpa);
+    var val = try ops.get(root, "a", gpa);
+    defer val.deinit(gpa);
+    try ops.push(&val, "", .{ .integer = 3 }, gpa);
+    try std.testing.expectEqual(@as(usize, 3), val.array.items.len);
+    try std.testing.expectEqual(@as(usize, 2), root.object.get("a").?.array.items.len);
+}
+
+test "set overwrite with different type" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1}");
+    defer root.deinit(gpa);
+    const hi = try gpa.dupe(u8, "hi");
+    try ops.set(&root, "a", .{ .string = hi }, gpa);
+    const a = root.object.get("a").?;
+    try std.testing.expect(a == .string);
+    try std.testing.expectEqualStrings("hi", a.string);
+}
+
+test "set deeply nested auto-create" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{}");
+    defer root.deinit(gpa);
+    try ops.set(&root, "a.b.c.d", .{ .integer = 99 }, gpa);
+    var val = try ops.get(root, "a.b.c.d", gpa);
+    defer val.deinit(gpa);
+    try std.testing.expect(val == .integer and val.integer == 99);
+}
+
+test "set on null creates object then sets" {
+    const gpa = std.testing.allocator;
+    var root: JsonValue = .null;
+    defer root.deinit(gpa);
+    try ops.set(&root, "x.y", .{ .integer = 7 }, gpa);
+    const out = try serialize(gpa, root);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("{\"x\":{\"y\":7}}", out);
+}
+
+test "set array index out of bounds" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "[1,2]");
+    defer root.deinit(gpa);
+    const result = ops.set(&root, "5", .{ .integer = 9 }, gpa);
+    try std.testing.expectError(ops.OpError.PathNotFound, result);
+}
+
+test "set on non-object non-null" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "\"hello\"");
+    defer root.deinit(gpa);
+    const result = ops.set(&root, "a", .{ .integer = 1 }, gpa);
+    try std.testing.expectError(ops.OpError.InvalidType, result);
+}
+
+test "set empty path replaces root" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1}");
+    defer root.deinit(gpa);
+    try ops.set(&root, "", .{ .integer = 42 }, gpa);
+    try std.testing.expect(root == .integer and root.integer == 42);
+}
+
+test "del only key leaves empty object" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1}");
+    defer root.deinit(gpa);
+    try ops.del(&root, "a", gpa);
+    try std.testing.expectEqual(@as(usize, 0), root.object.count());
+}
+
+test "del empty path is no-op" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1}");
+    defer root.deinit(gpa);
+    try ops.del(&root, "", gpa);
+    try std.testing.expectEqual(@as(usize, 1), root.object.count());
+}
+
+test "del on non-object" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "[1,2,3]");
+    defer root.deinit(gpa);
+    const result = ops.del(&root, "x", gpa);
+    try std.testing.expectError(ops.OpError.InvalidType, result);
+}
+
+test "del nested array element" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"items\":[1,2,3]}");
+    defer root.deinit(gpa);
+    try ops.del(&root, "items.1", gpa);
+    const out = try serialize(gpa, root);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("{\"items\":[1,3]}", out);
+}
+
+test "push to existing nested array via index" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"matrix\":[[],[]]}");
+    defer root.deinit(gpa);
+    try ops.push(&root, "matrix.0", .{ .integer = 1 }, gpa);
+    try ops.push(&root, "matrix.1", .{ .integer = 2 }, gpa);
+    const out = try serialize(gpa, root);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("{\"matrix\":[[1],[2]]}", out);
+}
+
+test "push null to array" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "[]");
+    defer root.deinit(gpa);
+    try ops.push(&root, "", .null, gpa);
+    const out = try serialize(gpa, root);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("[null]", out);
+}
+
+test "push to null auto-creates array" {
+    const gpa = std.testing.allocator;
+    var root: JsonValue = .null;
+    defer root.deinit(gpa);
+    try ops.push(&root, "", .{ .integer = 1 }, gpa);
+    const out = try serialize(gpa, root);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("[1]", out);
+}
+
+test "push on non-array non-object non-null" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "\"hello\"");
+    defer root.deinit(gpa);
+    const result = ops.push(&root, "", .{ .integer = 1 }, gpa);
+    try std.testing.expectError(ops.OpError.InvalidType, result);
+}
+
+test "pop returns correct value" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "[\"a\",\"b\",\"c\"]");
+    defer root.deinit(gpa);
+    var c = try ops.pop(&root, "", gpa);
+    defer c.deinit(gpa);
+    try std.testing.expect(c == .string);
+    try std.testing.expectEqualStrings("c", c.string);
+    var b = try ops.pop(&root, "", gpa);
+    defer b.deinit(gpa);
+    try std.testing.expect(b == .string);
+    try std.testing.expectEqualStrings("b", b.string);
+}
+
+test "pop on non-array" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1}");
+    defer root.deinit(gpa);
+    const result = ops.pop(&root, "a", gpa);
+    try std.testing.expectError(ops.OpError.InvalidType, result);
+}
+
+test "pop path not found" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"items\":[1]}");
+    defer root.deinit(gpa);
+    const result = ops.pop(&root, "nope", gpa);
+    try std.testing.expectError(ops.OpError.PathNotFound, result);
+}
+
+test "pick preserves order and values" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1,\"b\":2,\"c\":3}");
+    defer root.deinit(gpa);
+    const keys = [_][]const u8{ "c", "a" };
+    try ops.pick(&root, &keys, gpa);
+    try std.testing.expectEqual(@as(usize, 2), root.object.count());
+    try std.testing.expect(root.object.get("a") != null);
+    try std.testing.expect(root.object.get("c") != null);
+    try std.testing.expect(root.object.get("b") == null);
+}
+
+test "pick all keys" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1,\"b\":2}");
+    defer root.deinit(gpa);
+    const keys = [_][]const u8{ "a", "b" };
+    try ops.pick(&root, &keys, gpa);
+    try std.testing.expectEqual(@as(usize, 2), root.object.count());
+}
+
+test "omit all keys" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1,\"b\":2}");
+    defer root.deinit(gpa);
+    const keys = [_][]const u8{ "a", "b" };
+    try ops.omit(&root, &keys, gpa);
+    try std.testing.expectEqual(@as(usize, 0), root.object.count());
+}
+
+test "omit single key" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1,\"b\":2,\"c\":3}");
+    defer root.deinit(gpa);
+    const keys = [_][]const u8{"b"};
+    try ops.omit(&root, &keys, gpa);
+    try std.testing.expect(root.object.get("a") != null);
+    try std.testing.expect(root.object.get("c") != null);
+    try std.testing.expect(root.object.get("b") == null);
+}
+
+test "inferType bool case insensitive is not supported" {
+    const t = ops.inferType("True");
+    try std.testing.expect(t == .string);
+}
+
+test "inferType empty string" {
+    const s = ops.inferType("");
+    try std.testing.expect(s == .string);
+    try std.testing.expectEqualStrings("", s.string);
+}
+
+test "inferType zero integer" {
+    const i = ops.inferType("0");
+    try std.testing.expect(i == .integer and i.integer == 0);
+}
+
+test "inferType float with exponent" {
+    const f = ops.inferType("1.5e2");
+    try std.testing.expect(f == .number);
+    try std.testing.expectApproxEqAbs(150.0, f.number, 1e-10);
+}
+
+test "roundtrip complex nested" {
+    const gpa = std.testing.allocator;
+    const input = "{\"users\":[{\"name\":\"alice\",\"scores\":[100,95]},{\"name\":\"bob\",\"scores\":[80]}],\"active\":true,\"count\":2}";
+    var val = try ops.parse(gpa, input);
+    defer val.deinit(gpa);
+    const out = try serialize(gpa, val);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings(input, out);
+}
+
+test "roundtrip pretty then parse" {
+    const gpa = std.testing.allocator;
+    var val = try ops.parse(gpa, "{\"a\":1,\"b\":[2,3]}");
+    defer val.deinit(gpa);
+    const pretty = try serializePretty(gpa, val);
+    defer gpa.free(pretty);
+    var val2 = try ops.parse(gpa, pretty);
+    defer val2.deinit(gpa);
+    const compact = try serialize(gpa, val2);
+    defer gpa.free(compact);
+    try std.testing.expectEqualStrings("{\"a\":1,\"b\":[2,3]}", compact);
+}
+
+test "set then del leaves clean object" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{}");
+    defer root.deinit(gpa);
+    try ops.set(&root, "x", .{ .integer = 1 }, gpa);
+    try ops.set(&root, "y", .{ .integer = 2 }, gpa);
+    try ops.del(&root, "x", gpa);
+    const out = try serialize(gpa, root);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("{\"y\":2}", out);
+}
+
+test "push then pop preserves original" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "[1,2]");
+    defer root.deinit(gpa);
+    try ops.push(&root, "", .{ .integer = 3 }, gpa);
+    var popped = try ops.pop(&root, "", gpa);
+    defer popped.deinit(gpa);
+    const out = try serialize(gpa, root);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("[1,2]", out);
+}
+
+test "pick then serialize" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1,\"b\":2,\"c\":3}");
+    defer root.deinit(gpa);
+    const keys = [_][]const u8{ "a", "c" };
+    try ops.pick(&root, &keys, gpa);
+    const out = try serialize(gpa, root);
+    defer gpa.free(out);
+    try std.testing.expect(out.len > 0);
+    try std.testing.expect(root.object.get("a") != null);
+    try std.testing.expect(root.object.get("c") != null);
+}
+
+test "clone array with mixed types" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "[1,\"two\",true,null,[3],{\"x\":4}]");
+    defer root.deinit(gpa);
+    var cloned = try root.clone(gpa);
+    defer cloned.deinit(gpa);
+    const out = try serialize(gpa, cloned);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("[1,\"two\",true,null,[3],{\"x\":4}]", out);
+}
+
+test "get type of nested values" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":{\"b\":1},\"c\":[1,2],\"d\":\"hi\",\"e\":true,\"f\":null}");
+    defer root.deinit(gpa);
+    var a = try ops.get(root, "a", gpa);
+    defer a.deinit(gpa);
+    try std.testing.expectEqualStrings("object", a.getTypeName());
+    var b = try ops.get(root, "a.b", gpa);
+    defer b.deinit(gpa);
+    try std.testing.expectEqualStrings("number", b.getTypeName());
+    var c = try ops.get(root, "c", gpa);
+    defer c.deinit(gpa);
+    try std.testing.expectEqualStrings("array", c.getTypeName());
+    var d = try ops.get(root, "d", gpa);
+    defer d.deinit(gpa);
+    try std.testing.expectEqualStrings("string", d.getTypeName());
+    var e = try ops.get(root, "e", gpa);
+    defer e.deinit(gpa);
+    try std.testing.expectEqualStrings("boolean", e.getTypeName());
+    var f = try ops.get(root, "f", gpa);
+    defer f.deinit(gpa);
+    try std.testing.expectEqualStrings("null", f.getTypeName());
+}
+
+test "set array via dash index" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "[10,20,30]");
+    defer root.deinit(gpa);
+    try ops.set(&root, "-", .{ .integer = 99 }, gpa);
+    try std.testing.expect(root.array.items[2] == .integer and root.array.items[2].integer == 99);
+}
+
+test "set nested via array index" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "[{\"x\":1},{\"x\":2}]");
+    defer root.deinit(gpa);
+    try ops.set(&root, "0.x", .{ .integer = 99 }, gpa);
+    try std.testing.expect(root.array.items[0].object.get("x").?.integer == 99);
+}

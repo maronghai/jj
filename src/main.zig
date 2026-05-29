@@ -408,11 +408,27 @@ fn execSet(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, s
             if (value == .string) {
                 value = .{ .string = try gpa.dupe(u8, value.string) };
             }
+            i += 2;
+        } else if (value_str.len > 0 and (value_str[0] == '{' or value_str[0] == '[')) {
+            var json_buf: std.ArrayList(u8) = .empty;
+            defer json_buf.deinit(gpa);
+            try json_buf.appendSlice(gpa, value_str);
+            var j: usize = i + 2;
+            while (j < cmd_args.len) : (j += 1) {
+                try json_buf.append(gpa, ' ');
+                try json_buf.appendSlice(gpa, cmd_args[j]);
+            }
+            value = ops.parse(gpa, json_buf.items) catch |err| {
+                writeErrorFmt(gpa, io, "error: invalid JSON value: {s}\n", .{json_buf.items});
+                return err;
+            };
+            i = cmd_args.len;
         } else {
             value = parseValue(gpa, value_str) catch |err| {
                 writeErrorFmt(gpa, io, "error: invalid value: {s}\n", .{value_str});
                 return err;
             };
+            i += 2;
         }
         ops.set(root, path, value, gpa) catch |err| {
             switch (err) {
@@ -422,7 +438,6 @@ fn execSet(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, s
                 else => return err,
             }
         };
-        i += 2;
     }
 }
 
@@ -482,6 +497,28 @@ fn execPush(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8, 
             try obj.put(gpa, key_dup, .{ .string = val_dup });
         }
         ops.push(root, path, .{ .object = obj }, gpa) catch |err| {
+            switch (err) {
+                ops.OpError.PathNotFound => {
+                    writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});
+                },
+                ops.OpError.InvalidType => {
+                    writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
+                },
+                else => return err,
+            }
+        };
+    } else if (rest.len >= 1 and looksLikeJson(rest[0])) {
+        var json_buf: std.ArrayList(u8) = .empty;
+        defer json_buf.deinit(gpa);
+        for (rest, 0..) |val_str, idx| {
+            if (idx > 0) try json_buf.append(gpa, ' ');
+            try json_buf.appendSlice(gpa, val_str);
+        }
+        const value = ops.parse(gpa, json_buf.items) catch |err| {
+            writeErrorFmt(gpa, io, "error: invalid JSON value: {s}\n", .{json_buf.items});
+            return err;
+        };
+        ops.push(root, path, value, gpa) catch |err| {
             switch (err) {
                 ops.OpError.PathNotFound => {
                     writeErrorFmt(gpa, io, "error: path not found: {s}\n", .{path});

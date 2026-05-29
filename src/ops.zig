@@ -386,6 +386,7 @@ const JsonParser = struct {
         errdefer {
             var it = obj.iterator();
             while (it.next()) |e| {
+                self.gpa.free(e.key_ptr.*);
                 var v = e.value_ptr.*;
                 v.deinit(self.gpa);
             }
@@ -499,6 +500,7 @@ pub fn set(root: *JsonValue, path: []const u8, value: JsonValue, gpa: Allocator)
     var segments = parsePath(gpa, path) catch return OpError.InvalidPath;
     defer segments.deinit(gpa);
     if (segments.items.len == 0) {
+        root.deinit(gpa);
         root.* = value;
         return;
     }
