@@ -342,6 +342,8 @@ VERSION=$(cat package.json | jj get version --raw)
 
 ```sh
 jj -f config.json set server.port 8080 set server.host localhost
+jj -f config.json set server.port 8080 server.host localhost
+jj -f config.json server.port=8080 server.host=localhost
 ```
 
 ---

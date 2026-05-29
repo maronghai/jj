@@ -74,6 +74,8 @@ pub fn main(init: std.process.Init) !u8 {
 
     var commands: [32]CmdInfo = undefined;
     var cmd_count: usize = 0;
+    var shorthands: [64]usize = undefined;
+    var shorthand_count: usize = 0;
     var i: usize = cmd_start;
 
     while (i < args.len) {
@@ -92,15 +94,27 @@ pub fn main(init: std.process.Init) !u8 {
             }
             i = end;
         } else {
-            var root_mut = try readInput(gpa, file_path, io, false);
-            try execShorthand(gpa, &root_mut, token, stdout_file, stderr_file, io);
-            return 0;
+            if (shorthand_count < shorthands.len) {
+                shorthands[shorthand_count] = i;
+                shorthand_count += 1;
+            }
+            i += 1;
         }
     }
 
-    if (cmd_count == 0) {
+    if (cmd_count == 0 and shorthand_count == 0) {
         try usage(File.stderr(), io);
         return 1;
+    }
+
+    if (shorthand_count > 0) {
+        var root_mut = try readInput(gpa, file_path, io, false);
+        for (shorthands[0..shorthand_count]) |idx| {
+            try execShorthand(gpa, &root_mut, args[idx], stderr_file, io);
+        }
+        try writeResult(root_mut, gpa, stdout_file, io);
+        root_mut.deinit(gpa);
+        return 0;
     }
 
     if (commands[0].cmd == .@"new") {
@@ -1078,7 +1092,7 @@ fn execMerge(gpa: Allocator, root: *ops.JsonValue, cmd_args: []const []const u8,
     }
 }
 
-fn execShorthand(gpa: Allocator, root: *ops.JsonValue, cmd: []const u8, stdout: File, stderr: File, io: Io) !void {
+fn execShorthand(gpa: Allocator, root: *ops.JsonValue, cmd: []const u8, stderr: File, io: Io) !void {
     if (cmd.len == 0) {
         try File.writeStreamingAll(stderr, io, "error: unknown command\n");
         return;
@@ -1094,7 +1108,6 @@ fn execShorthand(gpa: Allocator, root: *ops.JsonValue, cmd: []const u8, stdout: 
                 else => return err,
             }
         };
-        try writeResult(root.*, gpa, stdout, io);
         return;
     }
     if (std.mem.indexOfScalar(u8, cmd, '=')) |eq_pos| {
@@ -1108,8 +1121,8 @@ fn execShorthand(gpa: Allocator, root: *ops.JsonValue, cmd: []const u8, stdout: 
             }
             ops.set(root, actual_path, value, gpa) catch |err| {
                 switch (err) {
-                    ops.OpError.InvalidType => {
-                        writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{actual_path});
+                    ops.OpError.InvalidType, ops.OpError.InvalidPath => {
+                        writeErrorFmt(gpa, io, "error: invalid type/path: {s}\n", .{actual_path});
                     },
                     else => return err,
                 }
@@ -1138,14 +1151,13 @@ fn execShorthand(gpa: Allocator, root: *ops.JsonValue, cmd: []const u8, stdout: 
             };
             ops.set(root, path, value, gpa) catch |err| {
                 switch (err) {
-                    ops.OpError.InvalidType => {
-                        writeErrorFmt(gpa, io, "error: invalid type at path: {s}\n", .{path});
+                    ops.OpError.InvalidType, ops.OpError.InvalidPath => {
+                        writeErrorFmt(gpa, io, "error: invalid type/path: {s}\n", .{path});
                     },
                     else => return err,
                 }
             };
         }
-        try writeResult(root.*, gpa, stdout, io);
         return;
     }
     writeErrorFmt(gpa, io, "error: unknown command: {s}\n", .{cmd});
