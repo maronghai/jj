@@ -14,6 +14,7 @@
 | shell-first     | 默认 stdin/stdout，天然 pipe                   |
 | 自动路径创建    | `set user.profile.name x` 中间节点自动补全      |
 | 类型推断        | `:=` 和 push 对象模式自动识别 bool/null/number  |
+| `^jj^` 内联构造 | `set a ^jj b 1^` 等价于 `set a '{"b":1}'`       |
 | 可组合          | 多指令链式执行，一次 pipe 完成多步操作          |
 | 零依赖          | 单二进制，无运行时，无 GC                       |
 
@@ -238,10 +239,53 @@ echo '{"name":"test","secret":"xxx","token":"yyy"}' | jj omit secret token set s
 .a.b                  等价 a.b
 user.name             对象字段
 history.0.role        数组索引
-items.-               末尾元素（- = last） TODO
+items.-               末尾元素（- = last）
 ```
 
 normalizePath 规则：`.` → `""`，`.a` → `a`，`.a.b` → `a.b`，`a.b` → `a.b`
+
+---
+
+## `^jj^` 内联 JSON 构造
+
+在 set/push 的 value 位置使用 `^jj <command> <args>... [command> <args>...]^` 语法，自动执行 jj 命令链并嵌入结果：
+
+```sh
+# ^jj set^ — 构造对象
+echo '{}' | jj set a ^jj set b 1 ^
+# => {"a":{"b":"1"}}
+
+# ^jj push^ — 构造数组
+echo '{}' | jj set a ^jj push 1 2 3 ^
+# => {"a":[1,2,3]}
+
+# 多命令链式 — set + push 在同一个 root 上执行
+echo '{}' | jj set a ^jj set b 2 push .c 3 ^
+# => {"a":{"b":"2","c":[3]}}
+
+echo '{}' | jj set a ^jj set b 2 set c:=true push .d 4 ^
+# => {"a":{"b":"2","c":true,"d":[4]}}
+
+# set + del 链式
+echo '{}' | jj set a ^jj set b 2 set c 3 del b ^
+# => {"a":{"c":"3"}}
+
+# set + omit 链式
+echo '{}' | jj set a ^jj set b 2 set c 3 set d 4 omit c ^
+# => {"a":{"b":"2","d":"4"}}
+
+# push 对象模式
+echo '{}' | jj set items ^jj push . x 1 y 2 ^
+# => {"items":[{"x":1,"y":2}]}
+
+# 单 token 形式（引号包围）
+echo '{}' | jj set a '^jj set b 2 push .c 3^'
+# => {"a":{"b":"2","c":[3]}}
+```
+
+支持的命令：`set`、`push`、`del`、`pop`、`pick`、`omit`。无命令名时退化为 key-value 对构造。
+
+`^jj^` 预处理在命令分发前执行：将 token 按命令名分割为命令链，在同一个 root 上依次执行，结果序列化为 JSON 内联值。
 
 ---
 

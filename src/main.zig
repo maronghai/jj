@@ -45,7 +45,143 @@ pub fn main(init: std.process.Init) !u8 {
         args_len += 1;
     }
     defer for (args_buf[0..args_len]) |a| gpa.free(a);
-    const args = args_buf[0..args_len];
+
+    var processed_buf: [MAX_ARGS][]const u8 = undefined;
+    var processed_len: usize = 0;
+    {
+        var si: usize = 0;
+        while (si < args_len) {
+            const a = args_buf[si];
+            var is_jj_start = false;
+            if (a.len >= 3 and a[0] == '^' and a[1] == 'j' and a[2] == 'j') is_jj_start = true;
+            if (is_jj_start) {
+                var inline_tokens: [64][]const u8 = undefined;
+                var inline_count: usize = 0;
+                if (a.len > 3 and a[a.len - 1] == '^') {
+                    const content = a[3 .. a.len - 1];
+                    var ci: usize = 0;
+                    while (ci < content.len) {
+                        while (ci < content.len and content[ci] == ' ') ci += 1;
+                        if (ci >= content.len) break;
+                        const tok_start = ci;
+                        while (ci < content.len and content[ci] != ' ') ci += 1;
+                        if (inline_count < inline_tokens.len) {
+                            inline_tokens[inline_count] = content[tok_start..ci];
+                            inline_count += 1;
+                        }
+                    }
+                    si += 1;
+                } else {
+                    si += 1;
+                    while (si < args_len) {
+                        const t = args_buf[si];
+                        if (t.len > 0 and t[t.len - 1] == '^') {
+                            if (t.len > 1) {
+                                if (inline_count < inline_tokens.len) {
+                                    inline_tokens[inline_count] = t[0 .. t.len - 1];
+                                    inline_count += 1;
+                                }
+                            }
+                            si += 1;
+                            break;
+                        }
+                        if (inline_count < inline_tokens.len) {
+                            inline_tokens[inline_count] = t;
+                            inline_count += 1;
+                        }
+                        si += 1;
+                    }
+                }
+                if (inline_count > 0) {
+                    var result_json: ?ops.JsonValue = null;
+                    var inline_cmds: [32]CmdInfo = undefined;
+                    var inline_cmd_count: usize = 0;
+                    var ti: usize = 0;
+                    while (ti < inline_count) {
+                        const tok = inline_tokens[ti];
+                        const maybe_cmd = parseCmdName(tok);
+                        if (maybe_cmd) |c| {
+                            const start = ti + 1;
+                            ti += 1;
+                            var end = start;
+                            while (end < inline_count) : (end += 1) {
+                                if (parseCmdName(inline_tokens[end]) != null) break;
+                            }
+                            if (inline_cmd_count < inline_cmds.len) {
+                                inline_cmds[inline_cmd_count] = .{ .cmd = c, .args_start = start, .args_end = end };
+                                inline_cmd_count += 1;
+                            }
+                            ti = end;
+                        } else {
+                            ti += 1;
+                        }
+                    }
+                    if (inline_cmd_count == 0) {
+                        var root: ops.JsonValue = .{ .object = .empty };
+                        var ki: usize = 0;
+                        while (ki + 1 < inline_count) {
+                            const key_dup = try gpa.dupe(u8, inline_tokens[ki]);
+                            var val = ops.inferType(inline_tokens[ki + 1]);
+                            if (val == .string) val = .{ .string = try gpa.dupe(u8, val.string) };
+                            switch (root) {
+                                .object => |*obj| try obj.put(gpa, key_dup, val),
+                                else => {},
+                            }
+                            ki += 2;
+                        }
+                        result_json = root;
+                    } else {
+                        var has_set = false;
+                        var has_push = false;
+                        var push_has_dot_path = false;
+                        for (inline_cmds[0..inline_cmd_count]) |info| {
+                            if (info.cmd == .set) has_set = true;
+                            if (info.cmd == .push) {
+                                has_push = true;
+                                const ca = inline_tokens[info.args_start..info.args_end];
+                                if (ca.len >= 1 and ca[0].len > 1 and ca[0][0] == '.' and ca[0][1] != '.') {
+                                    push_has_dot_path = true;
+                                }
+                            }
+                        }
+                        const default_array = has_push and !has_set and !push_has_dot_path;
+                        var root: ops.JsonValue = if (default_array) .{ .array = .empty } else .{ .object = .empty };
+                        for (inline_cmds[0..inline_cmd_count]) |info| {
+                            const ca = inline_tokens[info.args_start..info.args_end];
+                            switch (info.cmd) {
+                                .set => try execSet(gpa, &root, ca, File.stderr(), io),
+                                .del => try execDel(gpa, &root, ca, File.stderr(), io),
+                                .push => try execPush(gpa, &root, ca, File.stderr(), io),
+                                .pop => try execPop(gpa, &root, ca, File.stderr(), io),
+                                .pick => try execPick(gpa, &root, ca, File.stderr(), io),
+                                .omit => try execOmit(gpa, &root, ca, File.stderr(), io),
+                                else => {},
+                            }
+                        }
+                        result_json = root;
+                    }
+                    if (result_json) |rj| {
+                        var aw = Writer.Allocating.init(gpa);
+                        try rj.writeTo(&aw.writer);
+                        const json_str = try gpa.dupe(u8, aw.writer.buffer[0..aw.writer.end]);
+                        if (processed_len < MAX_ARGS) {
+                            processed_buf[processed_len] = json_str;
+                            processed_len += 1;
+                        }
+                        var mut = rj;
+                        mut.deinit(gpa);
+                    }
+                }
+            } else {
+                if (processed_len < MAX_ARGS) {
+                    processed_buf[processed_len] = a;
+                    processed_len += 1;
+                }
+                si += 1;
+            }
+        }
+    }
+    const args = processed_buf[0..processed_len];
 
     if (args.len < 2) {
         try usage(File.stderr(), io);
