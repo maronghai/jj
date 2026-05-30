@@ -465,7 +465,7 @@ JsonValue = union(enum)
 ## 项目结构
 
 ```
-zson/
+jj/
 ├── build.zig          # 构建配置（ops_test + main 双测试 step）
 ├── build.zig.zon      # 包清单（Zig 0.16 格式）
 └── src/
