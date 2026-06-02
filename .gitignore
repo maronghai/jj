@@ -1,9 +1,9 @@
-# Zig 构建产物
+# Zig
 .zig-cache/
 .zigmod/
 zig-out/
 
-# 编译中间产物
+# OBJ
 *.dll
 *.dylib
 *.exe
@@ -15,7 +15,7 @@ zig-out/
 *.so
 *.d
 
-# 模型与数据文件
+# MODEL/DATA
 *.bin
 *.ckpt
 *.gguf
@@ -23,7 +23,8 @@ zig-out/
 *.safetensors
 models/
 
-# IDE/编辑器配置
+# IDE
+.claude/
 .idea/
 .vscode/*
 !.vscode/extensions.json
@@ -32,11 +33,11 @@ models/
 *.swp
 *~
 
-# CodeArts 平台配置
+# CodeArts
 .arts/
 .codeartsdoer/
 
-# OS 临时文件
+# OS
 .$RECYCLE.BIN/
 .AppleDouble
 .DS_Store
@@ -45,3 +46,4 @@ models/
 Desktop.ini
 ehthumbs.db
 Thumbs.db
+.test
