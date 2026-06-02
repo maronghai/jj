@@ -403,7 +403,10 @@ fn usage(stderr: File, io: Io) !void {
         \\  pretty                 Pretty-print JSON
         \\  compact                Compact JSON output
         \\  type <path>            Get type of value at path
-        \\  merge <file>           Merge with JSON from file
+        \\  keys [path]            List object keys (one per line)
+        \\  has [path]             Check if path exists (prints true/false)
+        \\  length [path]          Array len / object key count / string byte len
+        \\  merge <file>           Merge with JSON from file (or '-' for stdin)
         \\
         \\Options:
         \\  -f, --file <path>      Read from file instead of stdin
