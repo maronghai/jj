@@ -379,38 +379,35 @@ fn usage(stderr: File, io: Io) !void {
     try File.writeStreamingAll(stderr, io,
         \\jj - shell-first JSON CLI
         \\
-        \\Usage: jj <command> [args] [command> [args] ...
-        \\       jj -f <file> <command> [args] ...
-        \\       jj <path>=<value>    (shorthand set string)
-        \\       jj <path>:=<value>   (shorthand set auto-type)
-        \\       jj <path>+=<value>   (shorthand array push)
-        \\       jj <path>-           (shorthand delete)
+        \\Usage: jj [-f <file>] <cmd> [args] [<cmd> [args] ...]
+        \\       jj <path>=<v>   shorthand: set string
+        \\       jj <path>:=<v>  shorthand: set (auto-type)
+        \\       jj <path>+=<v>  shorthand: array push
+        \\       jj <path>-      shorthand: delete
         \\
-        \\Multiple commands can be chained:
+        \\Chain multiple commands per invocation:
         \\  jj set a 1 del b push c v1 v2 omit d merge f
         \\
         \\Commands:
-        \\  new object|array       Create empty JSON
-        \\  get <path> [--raw]     Get value at path
-        \\  set <p> <v> [p v]...   Set path=value pairs (string)
-        \\  del <path>             Delete value at path
-        \\  push <path> <v>...     Push values to array
-        \\  push <path> <k> <v>... Push object (even key-value pairs)
-        \\  push <path> <k=v>...   Push object (k=v syntax)
-        \\  pop <path>             Pop from array
-        \\  pick <key>...          Keep only specified keys
-        \\  omit <key>...          Remove specified keys
-        \\  pretty                 Pretty-print JSON
-        \\  compact                Compact JSON output
-        \\  type <path>            Get type of value at path
-        \\  keys [path]            List object keys (one per line)
-        \\  has [path]             Check if path exists (prints true/false)
-        \\  length [path]          Array len / object key count / string byte len
-        \\  merge <file>           Merge with JSON from file (or '-' for stdin)
+        \\  new object|array    Create empty JSON
+        \\  get <path> [--raw]  Get value at path
+        \\  set <p> <v> [p v].. Set string values
+        \\  del <path>          Delete value
+        \\  push <path> <v>...  Append to array (3 modes: vals / kv / k=v)
+        \\  pop <path>          Pop from array tail
+        \\  pick <key>...       Keep only listed keys
+        \\  omit <key>...       Remove listed keys
+        \\  pretty              Pretty-print JSON
+        \\  compact             Compact output
+        \\  type <path>         Value type at path
+        \\  keys [path]         List object keys (one per line)
+        \\  has [path]          Check if path exists
+        \\  length [path]       Array / object / string size
+        \\  merge <file>        Merge file ('-' = stdin)
         \\
         \\Options:
-        \\  -f, --file <path>      Read from file instead of stdin
-        \\  --raw                  Output raw value (no quotes for strings)
+        \\  -f, --file <path>   Read from file instead of stdin
+        \\  --raw               Output string without quotes
         \\
     );
 }
