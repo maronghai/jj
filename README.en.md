@@ -4,6 +4,8 @@ Lightweight, composable, pipe-oriented JSON command-line tool. Written in Zig 0.
 
 > `jo`'s ease of use + `jq`'s mutation power + UNIX pipe philosophy
 
+> **⚠️ Name collision notice**: `jj` shares its name with the [Jujutsu VCS](https://github.com/martinvonz/jj) (a modern Rust VCS) and the historical `tidwall/jj` Go JSON library. This project is an independent shell-first JSON CLI and is not related to either. See [prd-01-decision.md](prd-01-decision.md) for context.
+
 ---
 
 ## Design Philosophy
@@ -157,11 +159,38 @@ echo '{"name":"abc","age":18}' | jj compact
 # => {"name":"abc","age":18}
 ```
 
-### merge — Merge File
+### merge — Merge File / stdin
 
 ```sh
+# From a file
 echo '{"a":1}' | jj merge extra.json
+
+# From stdin: use `-` or omit the argument
+echo '{"b":2}' | jj merge -
+echo '{"b":2}' | jj merge
+
+# Combine with -f: root from file, override from another file
+jj -f config.json merge overrides.json
 ```
+
+The merge source must be an object. Existing keys are overwritten.
+
+### Query — `keys` / `has` / `length`
+
+```sh
+echo '{"name":"alice","age":30}' | jj keys
+# => name
+# => age
+
+echo '{"name":"alice"}' | jj has name    # => true
+echo '{"name":"alice"}' | jj has email   # => false
+
+echo '[1,2,3,4,5]' | jj length          # => 5
+echo '{"a":1,"b":2,"c":3}' | jj length  # => 3
+echo '{"s":"hello"}' | jj length s       # => 5
+```
+
+No path argument targets the root.
 
 ---
 

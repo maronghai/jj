@@ -12,7 +12,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -42,4 +41,17 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&ops_tests.step);
     test_step.dependOn(&main_tests.step);
+
+    const bench = b.addExecutable(.{
+        .name = "jj-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    b.installArtifact(bench);
+    const bench_run = b.addRunArtifact(bench);
+    const bench_step = b.step("bench", "Run performance benchmarks");
+    bench_step.dependOn(&bench_run.step);
 }

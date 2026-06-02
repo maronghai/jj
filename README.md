@@ -4,6 +4,8 @@
 
 > `jo` 的易用性 + `jq` 的修改能力 + UNIX pipe 风格
 
+> **⚠️ 名字冲突提示**：`jj` 与 [Jujutsu VCS](https://github.com/martinvonz/jj)（Rust 写的版本控制工具）以及历史项目 tidwall/jj（Go JSON 库）同名。本项目是独立的 shell-first JSON CLI，与它们没有关系。详见 [prd-01-decision.md](prd-01-decision.md)。
+
 ---
 
 ## 设计哲学
@@ -157,11 +159,38 @@ echo '{"name":"abc","age":18}' | jj compact
 # => {"name":"abc","age":18}
 ```
 
-### merge — 合并文件
+### merge — 合并文件 / stdin
 
 ```sh
+# 文件
 echo '{"a":1}' | jj merge extra.json
+
+# stdin：用 `-` 或省略参数
+echo '{"b":2}' | jj merge -
+echo '{"b":2}' | jj merge
+
+# 与 -f 配合：root 从文件，merge 源也用文件
+jj -f config.json merge overrides.json
 ```
+
+merge source 必须是 object。merge 时已有的 key 被覆盖。
+
+### 查询 — `keys` / `has` / `length`
+
+```sh
+echo '{"name":"alice","age":30}' | jj keys
+# => name
+# => age
+
+echo '{"name":"alice"}' | jj has name    # => true
+echo '{"name":"alice"}' | jj has email   # => false
+
+echo '[1,2,3,4,5]' | jj length          # => 5
+echo '{"a":1,"b":2,"c":3}' | jj length  # => 3
+echo '{"s":"hello"}' | jj length s       # => 5
+```
+
+不传路径则作用于根。
 
 ---
 

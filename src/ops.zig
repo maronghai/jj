@@ -496,6 +496,130 @@ pub fn get(root: JsonValue, path: []const u8, gpa: Allocator) OpError!JsonValue 
     return try current.clone(gpa);
 }
 
+/// Returns all keys of the object at `path`. The returned `ArrayList` is
+/// unmanaged: caller must `gpa.free` each item then call `.deinit(gpa)`.
+///
+/// Errors: InvalidPath, PathNotFound, InvalidType (when path does not resolve
+/// to an object).
+pub fn keys(root: JsonValue, path: []const u8, gpa: Allocator) OpError!std.ArrayList([]const u8) {
+    var segments = parsePath(gpa, path) catch return OpError.InvalidPath;
+    defer segments.deinit(gpa);
+    var current = root;
+    for (segments.items) |seg| {
+        switch (seg) {
+            .key => |k| {
+                switch (current) {
+                    .object => |obj| {
+                        current = obj.get(k) orelse return OpError.PathNotFound;
+                    },
+                    else => return OpError.InvalidType,
+                }
+            },
+            .index => |idx| {
+                switch (current) {
+                    .array => |arr| {
+                        const actual_idx = if (idx == std.math.maxInt(usize)) arr.items.len -| 1 else idx;
+                        if (actual_idx >= arr.items.len) return OpError.PathNotFound;
+                        current = arr.items[actual_idx];
+                    },
+                    else => return OpError.InvalidType,
+                }
+            },
+        }
+    }
+    switch (current) {
+        .object => |obj| {
+            var result: std.ArrayList([]const u8) = .empty;
+            errdefer {
+                for (result.items) |k| gpa.free(k);
+                result.deinit(gpa);
+            }
+            var iter = obj.iterator();
+            while (iter.next()) |entry| {
+                const key_dup = try gpa.dupe(u8, entry.key_ptr.*);
+                errdefer gpa.free(key_dup);
+                try result.append(gpa, key_dup);
+            }
+            return result;
+        },
+        else => return OpError.InvalidType,
+    }
+}
+
+/// Returns true if `path` resolves within `root`. Does not allocate on
+/// the success path beyond the internal `parsePath` segments array.
+///
+/// Returns false for: invalid path syntax, missing intermediate key, out-of-
+/// bounds array index, or traversing a non-container (string/number/bool/null).
+pub fn has(root: JsonValue, path: []const u8, gpa: Allocator) bool {
+    var segments = parsePath(gpa, path) catch return false;
+    defer segments.deinit(gpa);
+    var current = root;
+    for (segments.items) |seg| {
+        switch (seg) {
+            .key => |k| {
+                switch (current) {
+                    .object => |obj| {
+                        const found = obj.get(k) orelse return false;
+                        current = found;
+                    },
+                    else => return false,
+                }
+            },
+            .index => |idx| {
+                switch (current) {
+                    .array => |arr| {
+                        const actual_idx = if (idx == std.math.maxInt(usize)) arr.items.len -| 1 else idx;
+                        if (actual_idx >= arr.items.len) return false;
+                        current = arr.items[actual_idx];
+                    },
+                    else => return false,
+                }
+            },
+        }
+    }
+    return true;
+}
+
+/// Returns the size of the value at `path`:
+/// - array  → `items.len`
+/// - object → `count()` (number of keys)
+/// - string → byte length
+/// - other  → `OpError.InvalidType`
+pub fn length(root: JsonValue, path: []const u8, gpa: Allocator) OpError!usize {
+    var segments = parsePath(gpa, path) catch return OpError.InvalidPath;
+    defer segments.deinit(gpa);
+    var current = root;
+    for (segments.items) |seg| {
+        switch (seg) {
+            .key => |k| {
+                switch (current) {
+                    .object => |obj| {
+                        current = obj.get(k) orelse return OpError.PathNotFound;
+                    },
+                    else => return OpError.InvalidType,
+                }
+            },
+            .index => |idx| {
+                switch (current) {
+                    .array => |arr| {
+                        const actual_idx = if (idx == std.math.maxInt(usize)) arr.items.len -| 1 else idx;
+                        if (actual_idx >= arr.items.len) return OpError.PathNotFound;
+                        current = arr.items[actual_idx];
+                    },
+                    else => return OpError.InvalidType,
+                }
+            },
+        }
+    }
+    return switch (current) {
+        .array => |arr| arr.items.len,
+        .object => |obj| obj.count(),
+        .string => |s| s.len,
+        else => OpError.InvalidType,
+    };
+}
+
 pub fn set(root: *JsonValue, path: []const u8, value: JsonValue, gpa: Allocator) OpError!void {
     var segments = parsePath(gpa, path) catch return OpError.InvalidPath;
     defer segments.deinit(gpa);
@@ -700,7 +824,7 @@ pub fn pop(root: *JsonValue, path: []const u8, gpa: Allocator) OpError!JsonValue
     }
 }
 
-pub fn pick(root: *JsonValue, keys: []const []const u8, gpa: Allocator) OpError!void {
+pub fn pick(root: *JsonValue, ks: []const []const u8, gpa: Allocator) OpError!void {
     switch (root.*) {
         .object => |*obj| {
             var to_remove: std.ArrayList([]const u8) = .empty;
@@ -708,7 +832,7 @@ pub fn pick(root: *JsonValue, keys: []const []const u8, gpa: Allocator) OpError!
             var iter = obj.iterator();
             while (iter.next()) |entry| {
                 var found = false;
-                for (keys) |k| {
+                for (ks) |k| {
                     if (std.mem.eql(u8, entry.key_ptr.*, k)) {
                         found = true;
                         break;
@@ -728,10 +852,10 @@ pub fn pick(root: *JsonValue, keys: []const []const u8, gpa: Allocator) OpError!
     }
 }
 
-pub fn omit(root: *JsonValue, keys: []const []const u8, gpa: Allocator) OpError!void {
+pub fn omit(root: *JsonValue, ks: []const []const u8, gpa: Allocator) OpError!void {
     switch (root.*) {
         .object => |*obj| {
-            for (keys) |k| {
+            for (ks) |k| {
                 if (obj.fetchSwapRemove(k)) |entry| {
                     var old_val = entry.value;
                     old_val.deinit(gpa);

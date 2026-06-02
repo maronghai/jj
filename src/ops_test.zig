@@ -1404,3 +1404,122 @@ test "set nested via array index" {
     try ops.set(&root, "0.x", .{ .integer = 99 }, gpa);
     try std.testing.expect(root.array.items[0].object.get("x").?.integer == 99);
 }
+
+test "keys basic object" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1,\"b\":2,\"c\":3}");
+    defer root.deinit(gpa);
+    var owned = try ops.keys(root, "", gpa);
+    defer {
+        for (owned.items) |k| gpa.free(k);
+        owned.deinit(gpa);
+    }
+    try std.testing.expectEqual(@as(usize, 3), owned.items.len);
+    // Order is preserved (insertion-ordered map)
+    try std.testing.expectEqualStrings("a", owned.items[0]);
+    try std.testing.expectEqualStrings("b", owned.items[1]);
+    try std.testing.expectEqualStrings("c", owned.items[2]);
+}
+
+test "keys nested object" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"outer\":{\"x\":1,\"y\":2}}");
+    defer root.deinit(gpa);
+    var owned = try ops.keys(root, "outer", gpa);
+    defer {
+        for (owned.items) |k| gpa.free(k);
+        owned.deinit(gpa);
+    }
+    try std.testing.expectEqual(@as(usize, 2), owned.items.len);
+}
+
+test "keys path not found" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1}");
+    defer root.deinit(gpa);
+    const result = ops.keys(root, "missing", gpa);
+    try std.testing.expectError(ops.OpError.PathNotFound, result);
+}
+
+test "keys on non-object returns InvalidType" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "[1,2,3]");
+    defer root.deinit(gpa);
+    const result = ops.keys(root, "", gpa);
+    try std.testing.expectError(ops.OpError.InvalidType, result);
+}
+
+test "has returns true for existing key" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1,\"b\":2}");
+    defer root.deinit(gpa);
+    try std.testing.expect(ops.has(root, "a", gpa));
+    try std.testing.expect(ops.has(root, "b", gpa));
+    try std.testing.expect(ops.has(root, "", gpa));
+}
+
+test "has returns false for missing key" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1}");
+    defer root.deinit(gpa);
+    try std.testing.expect(!ops.has(root, "missing", gpa));
+    try std.testing.expect(!ops.has(root, "a.b", gpa));
+}
+
+test "has on array index in bounds" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "[10,20,30]");
+    defer root.deinit(gpa);
+    try std.testing.expect(ops.has(root, "0", gpa));
+    try std.testing.expect(ops.has(root, "2", gpa));
+    try std.testing.expect(!ops.has(root, "5", gpa));
+}
+
+test "has on invalid path returns false" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1}");
+    defer root.deinit(gpa);
+    try std.testing.expect(!ops.has(root, "a..b", gpa));
+}
+
+test "length of array" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "[1,2,3,4,5]");
+    defer root.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 5), try ops.length(root, "", gpa));
+}
+
+test "length of object" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1,\"b\":2,\"c\":3}");
+    defer root.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 3), try ops.length(root, "", gpa));
+}
+
+test "length of string" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"s\":\"hello\"}");
+    defer root.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 5), try ops.length(root, "s", gpa));
+}
+
+test "length of nested array" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"items\":[1,2,3]}");
+    defer root.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 3), try ops.length(root, "items", gpa));
+}
+
+test "length path not found" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"a\":1}");
+    defer root.deinit(gpa);
+    try std.testing.expectError(ops.OpError.PathNotFound, ops.length(root, "missing", gpa));
+}
+
+test "length on number returns InvalidType" {
+    const gpa = std.testing.allocator;
+    var root = try ops.parse(gpa, "{\"n\":42}");
+    defer root.deinit(gpa);
+    try std.testing.expectError(ops.OpError.InvalidType, ops.length(root, "n", gpa));
+}
