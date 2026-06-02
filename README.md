@@ -1,380 +1,450 @@
 # jj — Shell-first JSON CLI
 
-轻量、可组合、面向管道的 JSON 命令行工具。用 Zig 0.16 编写，零依赖，单二进制。
+A lightweight, composable, pipe-oriented JSON command-line tool. Written in Zig 0.16 with zero dependencies and a single ~576KB binary.
 
-> `jo` 的易用性 + `jq` 的修改能力 + UNIX pipe 风格
+> `jo`'s ease of use + `jq`'s mutation power + UNIX pipe philosophy
 
-> **⚠️ 名字冲突提示**：`jj` 与 [Jujutsu VCS](https://github.com/martinvonz/jj)（Rust 写的版本控制工具）以及历史项目 tidwall/jj（Go JSON 库）同名。本项目是独立的 shell-first JSON CLI，与它们没有关系。详见 [prd-01-decision.md](prd-01-decision.md)。
+> [!NOTE]
+> **Name collision.** `jj` shares its name with [Jujutsu VCS](https://github.com/martinvonz/jj) (a modern Rust VCS) and the historical [tidwall/jj](https://github.com/tidwall/jj) Go JSON library. This project is an independent shell-first JSON CLI and is not related to either.
 
----
+## See it in action
 
-## 设计哲学
+```text
+$ echo '{}' | jj set name app port:=8080 debug:=true
+{"name":"app","port":8080,"debug":true}
 
-| 原则            | 体现                                          |
-| --------------- | --------------------------------------------- |
-| 无 DSL          | `jj set user.name abc` 而非 `.user.name = abc` |
-| shell-first     | 默认 stdin/stdout，天然 pipe                   |
-| 自动路径创建    | `set user.profile.name x` 中间节点自动补全      |
-| 类型推断        | `:=` 和 push 对象模式自动识别 bool/null/number  |
-| `^jj^` 内联构造 | `set a ^jj b 1^` 等价于 `set a '{"b":1}'`       |
-| 可组合          | 多指令链式执行，一次 pipe 完成多步操作          |
-| 零依赖          | 单二进制，无运行时，无 GC                       |
+$ echo '[1,2,3]' | jj pop .
+[1,2]
 
----
-
-## 构建
-
-```sh
-zig build -Doptimize=ReleaseSmall   # ~576KB
-zig build                           # debug
-zig build test                      # 运行 143 个单元测试
+$ echo '{"a":1,"b":2,"c":3}' | jj set d:=4 del b omit c pretty
+{
+  "a": 1,
+  "c": 3,
+  "d": 4
+}
 ```
 
 ---
 
-## 命令总览
+## Why jj?
 
-| 命令                     | 说明                                        |
-| ------------------------ | ------------------------------------------- |
-| `new object\|array`      | 创建空 JSON                                 |
-| `get <path> [--raw]`     | 读取值（`--raw` 去引号）                     |
-| `set <p> <v> [p v]...`   | 设置值，支持多对语法和 JSON 内联             |
-| `del <path>`             | 删除值                                      |
-| `push <path> <v>...`     | 追加到数组（三种模式，见下文）                |
-| `pop <path>`             | 弹出数组末尾                                |
-| `pick <key>...`          | 仅保留指定字段                              |
-| `omit <key>...`          | 移除指定字段                                |
-| `pretty`                 | 格式化输出                                  |
-| `compact`                | 压缩输出                                    |
-| `type <path>`            | 查看字段类型                                |
-| `merge <file>`           | 合并 JSON 文件                              |
+| Tool    | Strengths                | Weaknesses                       |
+| ------- | ------------------------ | -------------------------------- |
+| jq      | Powerful expressions     | DSL learning curve               |
+| jo      | Dead simple              | Create-only, no mutation         |
+| yq      | Full YAML / JSON         | Complex, Go dependency           |
+| fx      | Interactive REPL         | Not script-friendly              |
+| **jj**  | **Shell-first, mutates JSON** | **No streaming / transform DSL** |
 
----
+What makes `jj` different:
 
-## 基础用法
-
-### 创建
-
-```sh
-jj new object              # => {}
-jj new array               # => []
-```
-
-### 读取
-
-```sh
-echo '{"name":"abc","age":18}' | jj get name        # => "abc"
-echo '{"name":"abc","age":18}' | jj get name --raw  # => abc
-echo '{"name":"abc","age":18}' | jj get age --raw   # => 18
-echo '{"name":"abc","age":18}' | jj type age        # => number
-```
-
-### set — 设置值
-
-```sh
-# 基本设置（值默认为 string）
-echo '{}' | jj set user.name abc
-# => {"user":{"name":"abc"}}
-
-# 多对语法 — 一次设置多个字段
-echo '{}' | jj set a 1 b 2 c 3
-# => {"a":"1","b":"2","c":"3"}
-
-# JSON 内联 — 值以 { 或 [ 开头时自动 parse
-echo '{}' | jj set config '{"timeout":30,"retries":3}'
-# => {"config":{"timeout":30,"retries":3}}
-
-# 混合使用
-echo '{}' | jj set name app config '{"port":8080}' debug:=true
-# => {"name":"app","config":{"port":8080},"debug":true}
-```
-
-### del — 删除
-
-```sh
-echo '{"name":"abc","age":18}' | jj del age
-# => {"name":"abc"}
-```
-
-### push — 追加到数组
-
-push 有三种模式，根据参数形式自动判断：
-
-| 模式           | 语法                      | 行为                                  |
-| -------------- | ------------------------- | ------------------------------------- |
-| 独立值         | `push v1 v2 v3`           | 追加多个值到根数组（inferType 推断）   |
-| 根对象         | `push . k1 v1 k2 v2`      | 构建对象追加到根数组；root 为对象时 merge |
-| 路径对象       | `push .path k1 v1 k2 v2`  | 构建对象追加到命名路径的数组           |
-
-```sh
-# 模式 1：独立值
-echo '[]' | jj push hello world
-# => ["hello","world"]
-
-# 模式 2a：root 为数组 → 追加对象
-echo '[]' | jj push . role user content hello
-# => [{"role":"user","content":"hello"}]
-
-# 模式 2b：root 为对象 → merge
-echo '{"a":1}' | jj push . b 2
-# => {"a":1,"b":2}
-
-# 模式 3：路径对象 — 自动创建数组
-echo '{}' | jj push .items name widget count 5
-# => {"items":[{"name":"widget","count":5}]}
-
-# 传统 key=value 语法仍然支持 TODO
-echo '{}' | jj push history role=user content=hello
-# => {"history":[{"role":"user","content":"hello"}]}
-
-# push 内联 JSON
-echo '[]' | jj push '{"x":1,"y":2}'
-# => [{"x":1,"y":2}]
-```
-
-### pop — 弹出
-
-```sh
-echo '{"items":[1,2,3]}' | jj pop items
-# => {"items":[1,2]}
-```
-
-### pick / omit — 字段过滤
-
-```sh
-echo '{"a":1,"b":2,"c":3}' | jj pick a b    # => {"a":1,"b":2}
-echo '{"a":1,"b":2,"c":3}' | jj omit b c    # => {"a":1}
-```
-
-### pretty / compact — 格式化
-
-```sh
-echo '{"name":"abc","age":18}' | jj pretty
-# {
-#   "name": "abc",
-#   "age": 18
-# }
-
-echo '{"name":"abc","age":18}' | jj compact
-# => {"name":"abc","age":18}
-```
-
-### merge — 合并文件 / stdin
-
-```sh
-# 文件
-echo '{"a":1}' | jj merge extra.json
-
-# stdin：用 `-` 或省略参数
-echo '{"b":2}' | jj merge -
-echo '{"b":2}' | jj merge
-
-# 与 -f 配合：root 从文件，merge 源也用文件
-jj -f config.json merge overrides.json
-```
-
-merge source 必须是 object。merge 时已有的 key 被覆盖。
-
-### 查询 — `keys` / `has` / `length`
-
-```sh
-echo '{"name":"alice","age":30}' | jj keys
-# => name
-# => age
-
-echo '{"name":"alice"}' | jj has name    # => true
-echo '{"name":"alice"}' | jj has email   # => false
-
-echo '[1,2,3,4,5]' | jj length          # => 5
-echo '{"a":1,"b":2,"c":3}' | jj length  # => 3
-echo '{"s":"hello"}' | jj length s       # => 5
-```
-
-不传路径则作用于根。
+- **No DSL.** `jj set user.name alice` instead of `jq '.user.name = "alice"'`
+- **Multi-command chains.** `jj set a 1 del b omit c pretty` in one pipe
+- **Auto path creation.** `set server.tls.cert.path x` builds intermediate objects
+- **Auto type inference.** `debug:=true` becomes a boolean, not the string `"true"`
+- **Shell-native shorthand.** `user.age=18`, `tags+=dev`, `user.age-`
 
 ---
 
-## 类型推断
+## Build & Install
 
-`inferType` 在 push 对象模式和 `:=` 简写中自动激活：
-
-| 输入        | 推断结果           |
-| ----------- | ------------------ |
-| `true`      | `boolean: true`    |
-| `false`     | `boolean: false`   |
-| `null`      | `null`             |
-| `42`        | `integer: 42`      |
-| `-7`        | `integer: -7`      |
-| `3.14`      | `number: 3.14`     |
-| `1e3`       | `number: 1000.0`   |
-| `hello`     | `string: "hello"`  |
+Build from source (Zig 0.16+ required):
 
 ```sh
-# push 对象中值自动推断
-echo '[]' | jj push . name widget active true count 42 weight 3.14
-# => [{"name":"widget","active":true,"count":42,"weight":3.14}]
+git clone <repo> && cd jj
+zig build -Doptimize=ReleaseSmall
+./zig-out/bin/jj --version    # → jj 0.0.14
+```
 
-# push 独立值也推断
-echo '[]' | jj push true 42 null hello
-# => [true,42,null,"hello"]
+Run the test suite (143 unit tests):
+
+```sh
+zig build test
+```
+
+Run the benchmark suite:
+
+```sh
+zig build bench
 ```
 
 ---
 
-## Shell-native 简写
+## Quick start
+
+### Create
 
 ```sh
-echo '{}' | jj user.name=abc          # set string
-echo '{}' | jj user.age:=18           # set auto-type (number)
-echo '{}' | jj active:=true           # set auto-type (bool)
-echo '{}' | jj tags+=dev              # array push
-echo '{"name":"abc"}' | jj name-      # delete
+$ jj new object
+{}
+
+$ jj new array
+[]
 ```
 
-| 语法  | 类型        | 示例            |
-| ----- | ----------- | --------------- |
-| `=`   | string      | `user.name=abc` |
-| `:=`  | auto detect | `user.age:=18`  |
-| `+=`  | array push  | `tags+=dev`     |
-| `-`   | delete      | `user.age-`     |
-
----
-
-## 多指令链式执行
-
-多个命令在同一份 JSON 上依次执行，无需多次 pipe：
+### Read
 
 ```sh
-echo '{"a":1,"b":2,"c":3}' | jj set d 4 del b omit c
-# => {"a":1,"d":"4"}
+$ echo '{"name":"alice","age":30}' | jj get name
+"alice"
 
-echo '{}' | jj set a 1 push tags dev push tags staging del a
-# => {"tags":["dev","staging"]}
+$ echo '{"name":"alice","age":30}' | jj get age --raw
+30
 
-echo '{"name":"test","secret":"xxx","token":"yyy"}' | jj omit secret token set status active pretty
-# {
-#   "name": "test",
-#   "status": "active"
-# }
+$ echo '{"name":"alice","age":30}' | jj type age
+number
 ```
 
----
-
-## Dot Path 语法
-
-```
-.                     根路径（normalizePath: . → ""）
-.a                    等价 a（去掉前导 .）
-.a.b                  等价 a.b
-user.name             对象字段
-history.0.role        数组索引
-items.-               末尾元素（- = last）
-```
-
-normalizePath 规则：`.` → `""`，`.a` → `a`，`.a.b` → `a.b`，`a.b` → `a.b`
-
----
-
-## `^jj^` 内联 JSON 构造
-
-在 set/push 的 value 位置使用 `^jj <command> <args>... [command> <args>...]^` 语法，自动执行 jj 命令链并嵌入结果：
+### Build
 
 ```sh
-# ^jj set^ — 构造对象
-echo '{}' | jj set a ^jj set b 1 ^
-# => {"a":{"b":"1"}}
+# Values default to strings; `:=` enables type inference
+$ echo '{}' | jj set name app port:=8080 debug:=true
+{"name":"app","port":8080,"debug":true}
 
-# ^jj push^ — 构造数组
-echo '{}' | jj set a ^jj push 1 2 3 ^
-# => {"a":[1,2,3]}
-
-# 多命令链式 — set + push 在同一个 root 上执行
-echo '{}' | jj set a ^jj set b 2 push .c 3 ^
-# => {"a":{"b":"2","c":[3]}}
-
-echo '{}' | jj set a ^jj set b 2 set c:=true push .d 4 ^
-# => {"a":{"b":"2","c":true,"d":[4]}}
-
-# set + del 链式
-echo '{}' | jj set a ^jj set b 2 set c 3 del b ^
-# => {"a":{"c":"3"}}
-
-# set + omit 链式
-echo '{}' | jj set a ^jj set b 2 set c 3 set d 4 omit c ^
-# => {"a":{"b":"2","d":"4"}}
-
-# push 对象模式
-echo '{}' | jj set items ^jj push . x 1 y 2 ^
-# => {"items":[{"x":1,"y":2}]}
-
-# 单 token 形式（引号包围）
-echo '{}' | jj set a '^jj set b 2 push .c 3^'
-# => {"a":{"b":"2","c":[3]}}
+# Multi-pair syntax — set several fields in one call
+$ echo '{}' | jj set a 1 b 2 c 3
+{"a":"1","b":"2","c":"3"}
 ```
 
-支持的命令：`set`、`push`、`del`、`pop`、`pick`、`omit`。无命令名时退化为 key-value 对构造。
-
-`^jj^` 预处理在命令分发前执行：将 token 按命令名分割为命令链，在同一个 root 上依次执行，结果序列化为 JSON 内联值。
-
----
-
-## 智能拼接
-
-shell 分词会破坏含空格的 JSON 对象。`jj` 自动逐个追加参数并尝试 parse，成功即停止：
+### Modify
 
 ```sh
-# shell 展开后 {"b":"a b c"} 被分成 3 个 token
-# jj 智能拼接回完整 JSON
-echo '{}' | jj set a '{"b":"a b c"}'
-# => {"a":{"b":"a b c"}}
+$ echo '{"a":1,"b":2,"c":3}' | jj set a 99 del b omit c
+{"a":99}
 ```
 
-此机制在 `set` 和 `push` 的 JSON 内联值中均生效。
-
----
-
-## TTY 检测
-
-stdin 为终端时（无 pipe 输入），`jj` 不阻塞等待，自动创建默认值：
+### Filter
 
 ```sh
-# 无 stdin → 自动创建对象
-jj set a 1 b 2
-# => {"a":"1","b":"2"}
+$ echo '{"a":1,"b":2,"c":3}' | jj pick a c
+{"a":1,"c":3}
 
-# 只有 push 无 set → 自动创建数组
-jj push 1 2 3
-# => ["1","2","3"]
-
-# push 有 .path 形式 → 自动创建对象
-jj push .items name widget
-# => {"items":[{"name":"widget"}]}
+$ echo '[10,20,30]' | jj pop .
+[10,20]
 ```
 
----
-
-## 文件模式
+### Format
 
 ```sh
-jj -f config.json set server.port 8080
-# 等价于
-cat config.json | jj set server.port 8080
+$ echo '{"name":"alice","age":30}' | jj pretty
+{
+  "name": "alice",
+  "age": 30
+}
 ```
 
 ---
 
-## 选项
+## Demos
 
-| 选项         | 说明                      |
-| ------------ | ------------------------- |
-| `-f, --file` | 从文件读取（替代 stdin）    |
-| `--raw`      | 输出原始值（字符串不加引号） |
+### 1. Clean up an API response
+
+```text
+$ curl -s https://api.example.com/users/1
+{"id":"u_1","name":"Alice","email":"alice@example.com","token":"secret","internal_id":42}
+
+$ curl -s https://api.example.com/users/1 \
+    | jj pick id name email omit token internal_id
+{"id":"u_1","name":"Alice","email":"alice@example.com"}
+```
+
+### 2. Build an OpenAI chat completion payload
+
+```text
+$ msgs=$(jj new array)
+$ msgs=$(echo "$msgs" | jj push . role system content "You are a helpful assistant.")
+$ msgs=$(echo "$msgs" | jj push . role user content "What is 2+2?")
+$ msgs=$(echo "$msgs" | jj push . role assistant content "It's 4.")
+
+$ echo "$msgs" | jj pretty
+[
+  {
+    "role": "system",
+    "content": "You are a helpful assistant."
+  },
+  {
+    "role": "user",
+    "content": "What is 2+2?"
+  },
+  {
+    "role": "assistant",
+    "content": "It's 4."
+  }
+]
+```
+
+### 3. Patch a config file in place
+
+```text
+$ cat config.json
+{"server":{"host":"localhost","port":8080,"tls":false},"log_level":"info"}
+
+$ jj -f config.json set server.port:=9090 server.tls:=true log_level=debug
+{"server":{"host":"localhost","port":9090,"tls":true},"log_level":"debug"}
+```
+
+### 4. `^jj^` inline construction
+
+```text
+# ^jj ... ^ runs an inline jj chain and embeds the result
+$ echo '{}' | jj set user ^jj set name alice age:=30 ^
+{"user":{"name":"alice","age":30}}
+
+# Mix set + push in a single inline chain
+$ echo '{}' | jj set a ^jj set b 2 push .c 3 ^
+{"a":{"b":"2","c":[3]}}
+
+# Single-token (quoted) form — no shell word-splitting
+$ echo '{}' | jj set a '^jj set b 2 push .c 3^'
+{"a":{"b":"2","c":[3]}}
+```
+
+### 5. Shell-native shorthand in a single line
+
+```text
+# Set, delete, and type-infer in one go — no `set` / `del` keywords
+$ echo '{"name":"alice","age":30,"secret":"xxx","debug":false}' \
+    | jj age:=31 secret- debug:=true
+{"name":"alice","age":31,"debug":true}
+
+# Mix shorthand with full commands and pretty-print
+$ echo '{"a":1,"b":2,"c":3}' | jj set d:=4 del b omit c pretty
+{
+  "a": 1,
+  "c": 3,
+  "d": 4
+}
+```
+
+### 6. TTY mode — no input needed
+
+```text
+# When stdin is a terminal, jj auto-creates a sensible default root
+$ jj set a 1 b 2
+{"a":"1","b":"2"}
+
+$ jj push 1 2 3
+[1,2,3]
+
+$ jj push .items name widget count 5
+{"items":[{"name":"widget","count":5}]}
+```
+
+### 7. Merge — apply overrides to a base
+
+```text
+$ cat base.json
+{"server":{"host":"localhost","port":8080},"debug":false,"version":"1.0"}
+
+$ cat overrides.json
+{"server":{"port":9090},"debug":true}
+
+$ jj -f base.json merge overrides.json
+{"server":{"host":"localhost","port":9090},"debug":true,"version":"1.0"}
+```
 
 ---
 
-## 退出码
+## Command reference
 
-| 错误            | code |
+| Command                      | Description                                              |
+| ---------------------------- | -------------------------------------------------------- |
+| `new object` / `new array`   | Create empty JSON                                        |
+| `get <path> [--raw]`         | Read a value (`--raw` strips quotes for strings)         |
+| `set <p> <v> [p v]...`       | Set values; supports multi-pair, JSON inline, `:=` type  |
+| `del <path>`                 | Delete a value                                           |
+| `push <path> <v>...`         | Append to array (3 modes — see below)                    |
+| `pop <path>`                 | Pop the last element of an array                         |
+| `pick <key>...`              | Keep only listed keys                                    |
+| `omit <key>...`              | Remove listed keys                                       |
+| `pretty`                     | Pretty-print output                                      |
+| `compact`                    | Compact output                                           |
+| `type <path>`                | Print the value type at a path                           |
+| `keys [path]`                | List object keys (one per line)                          |
+| `has [path]`                 | Print `true` / `false` if the path exists                |
+| `length [path]`              | Print array / object / string length                     |
+| `merge <file>`               | Merge a JSON file (use `-` or omit for stdin)            |
+
+---
+
+## Features
+
+### Multi-command chaining
+
+Multiple commands execute sequentially on the same JSON, no extra pipes:
+
+```sh
+$ echo '{"a":1,"b":2,"c":3}' | jj set d 4 del b omit c
+{"a":1,"d":"4"}
+
+$ echo '{}' | jj set a 1 push tags dev push tags staging del a
+{"tags":["dev","staging"]}
+
+$ echo '{"name":"test","secret":"xxx","token":"yyy"}' \
+    | jj omit secret token set status active pretty
+{
+  "name": "test",
+  "status": "active"
+}
+```
+
+### Shell-native shorthand
+
+Skip the `set` / `del` / `push` keywords with operator suffixes:
+
+```sh
+$ echo '{}' | jj user.name=alice            # set string
+$ echo '{}' | jj user.age:=30               # set auto-type
+$ echo '{}' | jj active:=true               # boolean, not string
+$ echo '{}' | jj tags+=dev                  # array push
+$ echo '{"name":"abc"}' | jj name-          # delete
+```
+
+| Syntax | Operation        | Example           |
+| ------ | ---------------- | ----------------- |
+| `=`    | set string       | `user.name=alice` |
+| `:=`   | set auto-detect  | `user.age:=30`    |
+| `+=`   | array push       | `tags+=dev`       |
+| `-`    | delete           | `name-`           |
+
+### Dot path syntax
+
+```
+.                     root (normalizePath: . → "")
+.a                    equivalent to a (drop leading .)
+.a.b                  equivalent to a.b
+user.name             object field
+history.0.role        array index
+items.-               last element (- = maxInt(usize) sentinel)
+```
+
+### Type inference
+
+`inferType` is active in `push` object mode and `:=` shorthand:
+
+| Input   | Result             |
+| ------- | ------------------ |
+| `true`  | `boolean: true`    |
+| `false` | `boolean: false`   |
+| `null`  | `null`             |
+| `42`    | `integer: 42`      |
+| `-7`    | `integer: -7`      |
+| `3.14`  | `number: 3.14`     |
+| `1e3`   | `number: 1000.0`   |
+| `hello` | `string: "hello"`  |
+
+```sh
+$ echo '[]' | jj push . name widget active true count 42 weight 3.14
+[{"name":"widget","active":true,"count":42,"weight":3.14}]
+
+$ echo '[]' | jj push true 42 null hello
+[true,42,null,"hello"]
+```
+
+### push — three modes
+
+`push` picks a mode based on the first argument:
+
+| Mode          | Syntax                     | Behavior                                                                 |
+| ------------- | -------------------------- | ------------------------------------------------------------------------ |
+| Plain values  | `push v1 v2 v3`            | Append to root array (type-inferred)                                     |
+| Object build  | `push . k1 v1 k2 v2`       | Build object — append to root array, or merge into root if it's an object |
+| Named path    | `push .path k1 v1 k2 v2`   | Build object — append to `.path`'s array (auto-creates if missing)       |
+
+```sh
+# Mode 1: plain values
+$ echo '[]' | jj push hello world
+["hello","world"]
+
+# Mode 2a: root is array → append object
+$ echo '[]' | jj push . role user content hello
+[{"role":"user","content":"hello"}]
+
+# Mode 2b: root is object → merge
+$ echo '{"a":1}' | jj push . b 2
+{"a":1,"b":2}
+
+# Mode 3: named path — auto-creates the array
+$ echo '{}' | jj push .items name widget count 5
+{"items":[{"name":"widget","count":5}]}
+
+# Inline JSON
+$ echo '[]' | jj push '{"x":1,"y":2}'
+[{"x":1,"y":2}]
+```
+
+### `^jj^` inline construction
+
+Use `^jj <command> <args>... [command> <args>...]^` in a `set` or `push` value position to execute a sub-chain and embed the result. Supports `set`, `push`, `del`, `pop`, `pick`, `omit`.
+
+```sh
+# ^jj set^ — construct an object
+$ echo '{}' | jj set a ^jj set b 1 ^
+{"a":{"b":"1"}}
+
+# ^jj push^ — construct an array
+$ echo '{}' | jj set a ^jj push 1 2 3 ^
+{"a":[1,2,3]}
+
+# Multi-command chain — set + push on the same root
+$ echo '{}' | jj set a ^jj set b 2 set c:=true push .d 4 ^
+{"a":{"b":"2","c":true,"d":[4]}}
+```
+
+### Smart concatenation
+
+Shell tokenization breaks JSON literals containing spaces. `jj` progressively glues tokens back together until a valid JSON value parses:
+
+```sh
+# After shell expansion `{"b":"a b c"}` arrives as 3 tokens
+# jj stitches them back into a single JSON object
+$ echo '{}' | jj set a '{"b":"a b c"}'
+{"a":{"b":"a b c"}}
+```
+
+Works for both `set` and `push` JSON inline values.
+
+### TTY detection
+
+When stdin is a terminal, `jj` does **not** block. It picks a sensible default root based on the commands:
+
+| First command        | Default root |
+| -------------------- | ------------ |
+| `set` (or any mix)   | `{}`         |
+| `push` (no `.path`)  | `[]`         |
+| `push .path ...`     | `{}`         |
+
+```sh
+$ jj set a 1 b 2
+{"a":"1","b":"2"}
+
+$ jj push 1 2 3
+[1,2,3]
+
+$ jj push .items name widget
+{"items":[{"name":"widget"}]}
+```
+
+### File mode
+
+```sh
+# -f reads from a file instead of stdin
+$ jj -f config.json set server.port:=8080
+# equivalent to:
+$ cat config.json | jj set server.port:=8080
+```
+
+### Options
+
+| Option                | Description                              |
+| --------------------- | ---------------------------------------- |
+| `-f, --file <path>`   | Read from a file instead of stdin        |
+| `--raw`               | Print string / number / bool without quotes |
+
+### Exit codes
+
+| Error           | Code |
 | --------------- | ---- |
 | parse error     | 1    |
 | path not found  | 2    |
@@ -382,136 +452,113 @@ cat config.json | jj set server.port 8080
 
 ---
 
-## 实战场景
+## Real-world scenarios
 
-### AI Agent — 构建 OpenAI messages
+### AI agent — build OpenAI messages
 
 ```sh
 msgs=$(jj new array)
 msgs=$(echo "$msgs" | jj push . role system content "$SYSTEM_PROMPT")
 msgs=$(echo "$msgs" | jj push . role user content "hello")
+msgs=$(echo "$msgs" | jj push . role assistant content "hi")
 ```
 
-### 无 pipe 快速构建
+### CI/CD — bump the version
 
 ```sh
-jj set name app version 1.0.0 debug:=false
-# => {"name":"app","version":"1.0.0","debug":false}
+VERSION=$(cat package.json | jj get version --raw)
+echo "Current version: $VERSION"
+
+cat package.json | jj version=1.2.4 > package.json.tmp
+mv package.json.tmp package.json
 ```
 
-### Shell 管道过滤
+### Config patching
+
+```sh
+# Three equivalent ways to patch server.port and server.host
+jj -f config.json set server.port 8080 server.host localhost
+jj -f config.json server.port=8080 server.host=localhost
+jj -f config.json server.port:=8080 server.host=localhost
+```
+
+### API response filtering
 
 ```sh
 curl api.example.com | jj get data.items | jj pick id name
 ```
 
-### CI/CD — 读取版本号
-
-```sh
-VERSION=$(cat package.json | jj get version --raw)
-```
-
-### 配置修改
-
-```sh
-jj -f config.json set server.port 8080 set server.host localhost
-jj -f config.json set server.port 8080 server.host localhost
-jj -f config.json server.port=8080 server.host=localhost
-```
-
 ---
 
-## 内部实现
+## Internals
 
-### JSON 值表示
+### JSON value representation
 
 ```
 JsonValue = union(enum)
   null
   boolean: bool
-  integer: i64          # 整数独立存储，不丢失精度
-  number: f64           # 浮点数
-  string: []const u8    # gpa.dupe 拥有所有权
-  array:  ArrayList(JsonValue)
-  object: String(JsonValue)   # 有序 map
+  integer: i64          # integers stored separately — no precision loss
+  number:  f64          # floats
+  string:  []const u8   # gpa.dupe owned
+  array:   ArrayList(JsonValue)
+  object:  String(JsonValue)   # ordered map
 ```
 
 ### Parser
 
-手写递归下降，支持：
-- 完整 JSON 规范：null / bool / integer / float / string / array / object
-- 科学计数法：`1e3`, `-2.5E+10`
-- 字符串转义：`\" \\ \/ \n \r \t \b \f`
-- Unicode escape：`\u0041` (1/2/3 字节 UTF-8 编码)
-- Duplicate key：后值覆盖前值，旧 key/value 正确释放
+Hand-written recursive descent, supporting:
 
-### 路径操作
+- Full JSON: `null` / `bool` / `int` / `float` / `string` / `array` / `object`
+- Scientific notation: `1e3`, `-2.5E+10`
+- String escapes: `\" \\ \/ \n \r \t \b \f`
+- Unicode escape: `A` (auto-encoded as 1 / 2 / 3-byte UTF-8)
+- Duplicate keys: later value wins, old key / value freed safely
 
-- `parsePath` — 将 dot path 解析为 `PathSegment` 序列（`.key` / `.index`）
-- `set` — 递归遍历+自动创建中间节点（null → object/array）
-- `del` — `fetchSwapRemove` + key/value 释放
-- `push` — 路径不存在时自动创建空数组再追加
-- `pop` — `orderedRemove` 返回弹出值
-- `pick/omit` — 基于遍历的字段过滤
-- `inferType` — 顺序尝试：bool → null → parseInt → parseFloat → string
+### Path operations
 
-### 内存安全
+- `parsePath` — dot path → `[]PathSegment` (key / index). `-` is a sentinel for the last element.
+- `set` — recursive traversal + auto-create intermediate nodes (`null → object / array`).
+- `del` — `fetchSwapRemove` on objects, `orderedRemove` on arrays.
+- `push` — auto-creates an empty array when the path doesn't exist.
+- `pop` — `arr.pop().?` returns the value, caller owns it.
+- `pick` / `omit` — traversal-based field filtering.
+- `inferType` — try in order: `bool` → `null` → `parseInt` → `parseFloat` → `string`.
 
-- 所有 `deinit` 递归释放子节点 + key 字符串
-- `parseString` 返回 `gpa.dupe` 拥有所有权
-- `fetchPut` duplicate key：释放新 key，保留旧 key
-- `parseObject` errdefer 释放已分配的 key/value
-- `set` 空路径替换 root：先 `root.deinit(gpa)` 再赋值
-- 143 个测试全部通过，零泄漏
+### Memory safety
 
----
+- `deinit` recursively frees children and keys; `parseString` returns `gpa.dupe` to own the slice.
+- `parseObject` `errdefer` cleans up already-allocated key / value pairs on error.
+- `fetchPut` on duplicate key: free the new key, keep the old (and free the old value).
+- `set ""` (empty path) replaces the root: deinit-then-assign.
 
-## 与现有工具对比
-
-| 工具 | 优点         | 缺点                    |
-| ---- | ------------ | ----------------------- |
-| jq   | 表达力强     | DSL 学习曲线陡          |
-| jo   | 简单易用     | 只能创建，不能修改       |
-| yq   | YAML 全功能  | 复杂，Go 依赖           |
-| fx   | 交互式友好   | 不适合脚本              |
-| jj   | shell-first  | 无流式/transform 表达式 |
+143 unit tests, zero leaks (validated with Zig's testing allocator).
 
 ---
 
-## 技术栈
+## Tech stack
 
-| 项         | 值                                      |
-| ---------- | --------------------------------------- |
-| 语言       | Zig 0.16.0                              |
-| JSON 解析  | 手写递归下降 parser                     |
-| 内存       | Unmanaged 容器 + 显式 gpa，无 GC        |
-| 测试       | 143 个单元测试（ops_test + main）        |
-| 平台       | Linux / macOS / Windows                 |
-| 体积       | ReleaseSmall ~576KB                     |
+| Item         | Value                                  |
+| ------------ | -------------------------------------- |
+| Language     | Zig 0.16.0                             |
+| JSON parser  | Hand-written recursive descent         |
+| Memory       | Unmanaged containers + explicit `gpa`  |
+| Tests        | 143 unit tests (`ops_test` + `main`)   |
+| Platforms    | Linux / macOS / Windows                |
+| Binary size  | `ReleaseSmall` ~576KB                  |
 
----
-
-## 项目结构
+## Project structure
 
 ```
 jj/
-├── build.zig          # 构建配置（ops_test + main 双测试 step）
-├── build.zig.zon      # 包清单（Zig 0.16 格式）
+├── build.zig          # Build config (main + ops_test + main_test + bench)
+├── build.zig.zon      # Package manifest (Zig 0.16 format)
 └── src/
-    ├── main.zig       # CLI 入口：参数解析、多指令分割、命令分发、
-    │                  #   I/O、TTY 检测、normalizePath、parseValue、
-    │                  #   execSet（多对+JSON 拼接）、execPush（三种模式+
-    │                  #   对象构建+智能拼接）、execDel/Pop/Pick/Omit/
-    │                  #   Type/Merge、execShorthand
-    ├── ops.zig        # JSON 核心：JsonValue union、parse/get/set/del/
-    │                  #   push/pop/pick/omit/merge/inferType、
-    │                  #   writeTo/writePretty、parsePath、内存安全
-    │                  #   deinit/clone
-    └── ops_test.zig   # 143 个单元测试：parse 边界、writeTo/writePretty、
-                       #   clone、路径、所有操作、roundtrip、组合操作
+    ├── main.zig       # CLI entry, multi-cmd dispatch, I/O, TTY, ^jj^ preprocessing
+    ├── ops.zig        # JsonValue, parser, get/set/del/push/pop/pick/omit/merge
+    ├── ops_test.zig   # 143 unit tests
+    └── bench.zig      # Performance benchmarks
 ```
-
----
 
 ## License
 
